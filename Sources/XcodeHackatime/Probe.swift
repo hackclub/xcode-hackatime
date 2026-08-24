@@ -1,8 +1,8 @@
-import ApplicationServices
 import AppKit
+import ApplicationServices
 
-/// `xcode-hackatime probe` - dumps what Xcode currently exposes through
-/// Accessibility. For development and bug reports.
+/// `xcode-hackatime probe` dumps what Xcode currently exposes through
+/// Accessibility. for development and bug reports.
 enum Probe {
     static func run() -> Int32 {
         guard AXIsProcessTrusted() else {
@@ -28,15 +28,15 @@ enum Probe {
         if let sel = AX.range(focused, kAXSelectedTextRangeAttribute as String) {
             print("cursor offset = \(sel.location) (selection length \(sel.length))")
             if let prefix = AX.string(focused, forRange: CFRange(location: 0, length: sel.location)) {
-                var line = 1, lastNL = -1
-                for (i, u) in prefix.utf16.enumerated() where u == 0x0A { line += 1; lastNL = i }
-                print("derived line = \(line), column = \(sel.location - lastNL)")
+                let position = XcodeObserver.lineColumn(ofPrefix: prefix, offset: sel.location)
+                print("derived line = \(position.line), column = \(position.column)")
             } else {
                 print("AXStringForRange: unavailable")
             }
             var idx = sel.location as CFIndex
             if let n = CFNumberCreate(nil, .cfIndexType, &idx),
-               let displayLine = AX.parameterized(focused, "AXLineForIndex", n) as? NSNumber {
+                let displayLine = AX.parameterized(focused, "AXLineForIndex", n) as? NSNumber
+            {
                 print("AXLineForIndex (display/soft-wrapped) = \(displayLine)")
             }
         }
@@ -49,13 +49,24 @@ enum Probe {
         return 0
     }
 
+    /// attributes that carry document content. probe output goes into bug
+    /// reports, so print their size, never their text. a selection can be
+    /// anything, including credentials.
+    private static let contentAttributes: Set<String> = [
+        kAXValueAttribute as String,
+        kAXSelectedTextAttribute as String,
+        "AXVisibleText",
+    ]
+
     private static func dump(_ element: AXUIElement, label: String) {
         print("=== \(label) ===")
         for name in AX.attributeNames(element) {
-            if ["AXChildren", "AXVisibleChildren", "AXRows", "AXColumns", "AXVisibleCharacterRange"].contains(name) { continue }
-            if name == kAXValueAttribute as String {
+            if ["AXChildren", "AXVisibleChildren", "AXRows", "AXColumns", "AXVisibleCharacterRange"].contains(name) {
+                continue
+            }
+            if contentAttributes.contains(name) {
                 if let v = AX.string(element, name) {
-                    print("  AXValue: <\(v.count) chars>")
+                    print("  \(name): <\(v.count) chars>")
                 }
                 continue
             }
@@ -81,7 +92,9 @@ enum Probe {
 
     private static func describe(_ value: CFTypeRef?) -> String {
         guard let value else { return "<nil>" }
-        if let s = value as? String { return s }
+        // backstop for content that sneaks in through unlisted attributes:
+        // metadata strings (roles, paths, titles) are short.
+        if let s = value as? String { return s.count > 200 ? "<\(s.count) chars>" : s }
         if let n = value as? NSNumber { return n.stringValue }
         if CFGetTypeID(value) == AXValueGetTypeID() {
             let ax = value as! AXValue

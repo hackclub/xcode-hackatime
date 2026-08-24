@@ -1,25 +1,25 @@
 import AppKit
 
-/// `xcode-hackatime onboard` - a small window shown while Xcode is open but
-/// Accessibility permission hasn't been granted. Spawned by the agent, which
-/// itself stays headless (it must exit/relaunch to pick up fresh TCC state;
+/// `xcode-hackatime onboard` shows a small window while Xcode is open but
+/// Accessibility permission is not granted. the agent spawns it and itself
+/// stays headless (the agent must exit/relaunch to pick up fresh TCC state;
 /// keeping the UI in this separate stable process avoids window flicker).
 ///
-/// The window dismisses itself when the agent's trusted marker file is
-/// touched (i.e. tracking actually started), or when the user closes it.
-/// A user close is remembered for the rest of the current Xcode run, so the
-/// agent's respawn loop doesn't put the window straight back.
+/// the window dismisses itself when the agent touches its trusted marker
+/// file (i.e. tracking actually started), or when the user closes it.
+/// a user close persists for the rest of the current Xcode run, so the
+/// agent's respawn loop does not put the window straight back.
 enum Onboarding {
     static var pidFile: String { Installer.installDir + "/xcode-hackatime-onboard.pid" }
-    /// Touched by the agent every time it starts up trusted.
+    /// the agent touches this every time it starts up trusted.
     static var trustedMarker: String { Installer.installDir + "/.ax-trusted" }
-    /// Touched when the user closes the window without granting permission.
+    /// touched when the user closes the window without granting permission.
     static var dismissedMarker: String { Installer.installDir + "/.onboarding-dismissed" }
 
-    /// True if an onboarding window process is already alive. The onboard
+    /// true if an onboarding window process is already alive. the onboard
     /// process holds an exclusive flock on the pid file for its lifetime, and
-    /// the kernel drops the lock the moment it dies - so unlike a pid check,
-    /// this can't be fooled by a stale file or a recycled pid.
+    /// the kernel drops the lock the moment it dies. unlike a pid check,
+    /// a stale file or a recycled pid cannot fool this.
     static func isRunning() -> Bool {
         let fd = open(pidFile, O_RDONLY)
         guard fd >= 0 else { return false }
@@ -31,8 +31,8 @@ enum Onboarding {
         return errno == EWOULDBLOCK
     }
 
-    /// True if the user closed the window during the current Xcode run.
-    /// A dismissal from a previous Xcode run doesn't count, so quitting and
+    /// true if the user closed the window during the current Xcode run.
+    /// a dismissal from a previous Xcode run does not count, so quitting and
     /// reopening Xcode shows the window again.
     private static func dismissedThisXcodeSession() -> Bool {
         guard let dismissedAt = FileManager.default.modificationDate(atPath: dismissedMarker) else { return false }
@@ -42,18 +42,18 @@ enum Onboarding {
 
     static func spawnIfNeeded() {
         guard !isRunning(), !dismissedThisXcodeSession() else { return }
-        // Spawn our own binary, not the installed copy - they differ when
+        // spawn our own binary, not the installed copy. they differ when
         // running from a build directory during development.
         Installer.spawnSelf(["onboard"], discardOutput: false)
     }
 
     static func run() -> Int32 {
-        try? FileManager.default.createDirectory(atPath: Installer.installDir, withIntermediateDirectories: true)
-        // Hold an exclusive lock on the pid file for our whole lifetime (the
-        // fd is deliberately never closed); see isRunning().
+        Installer.ensureInstallDir()
+        // hold an exclusive lock on the pid file for our whole lifetime (we
+        // deliberately never close the fd); see isRunning().
         let fd = open(pidFile, O_WRONLY | O_CREAT, 0o644)
         guard fd >= 0, flock(fd, LOCK_EX | LOCK_NB) == 0 else {
-            return 0 // another onboarding window is already up
+            return 0  // another onboarding window is already up
         }
         ftruncate(fd, 0)
         "\(ProcessInfo.processInfo.processIdentifier)\n".withCString { _ = write(fd, $0, strlen($0)) }
@@ -67,13 +67,14 @@ enum Onboarding {
         window.makeKeyAndOrderFront(nil)
         app.activate(ignoringOtherApps: true)
 
-        // Dismiss when tracking starts (agent touches the marker), when the
-        // user closes the window, or when Xcode quits (the window only makes
-        // sense alongside a running Xcode; not a user dismissal, so it comes
-        // back on the next Xcode launch).
+        // dismiss when tracking starts (the agent touches the marker), when
+        // the user closes the window or when Xcode quits (the window only
+        // makes sense alongside a running Xcode; that is not a user
+        // dismissal, so it comes back on the next Xcode launch).
         Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { _ in
             if let mtime = FileManager.default.modificationDate(atPath: trustedMarker),
-               mtime > launchedAt {
+                mtime > launchedAt
+            {
                 finish(dismissedByUser: false)
             }
             if !window.isVisible {
@@ -88,11 +89,11 @@ enum Onboarding {
         return 0
     }
 
-    /// NSApplication.terminate never returns, so cleanup can't live after
+    /// NSApplication.terminate never returns, so cleanup cannot live after
     /// app.run(); do it here and exit directly instead.
     private static func finish(dismissedByUser: Bool) -> Never {
         if dismissedByUser {
-            FileManager.default.createFile(atPath: dismissedMarker, contents: Data())
+            Installer.touchMarker(dismissedMarker)
         }
         try? FileManager.default.removeItem(atPath: pidFile)
         exit(0)
@@ -120,24 +121,28 @@ enum Onboarding {
         content.edgeInsets = NSEdgeInsets(top: 40, left: 36, bottom: 28, right: 36)
         content.translatesAutoresizingMaskIntoConstraints = false
 
-        // Icon
-        if let icon = NSImage(systemSymbolName: "clock.badge.checkmark",
-                              accessibilityDescription: "Hackatime") {
+        // icon
+        if let icon = NSImage(
+            systemSymbolName: "clock.badge.checkmark",
+            accessibilityDescription: "Hackatime")
+        {
             let config = NSImage.SymbolConfiguration(pointSize: 52, weight: .medium)
                 .applying(.init(hierarchicalColor: .controlAccentColor))
             let imageView = NSImageView(image: icon.withSymbolConfiguration(config) ?? icon)
             content.addArrangedSubview(imageView)
         }
 
-        // Title
+        // title
         let title = NSTextField(labelWithString: "One step to start tracking Xcode")
         title.font = .systemFont(ofSize: 20, weight: .bold)
         title.alignment = .center
         content.addArrangedSubview(title)
 
-        // Subtitle
-        let subtitle = NSTextField(wrappingLabelWithString:
-            "Hackatime needs Accessibility permission to see which file and line you're working on in Xcode. It never reads your keystrokes in other apps, and your code never leaves your Mac.")
+        // subtitle
+        let subtitle = NSTextField(
+            wrappingLabelWithString:
+                "Hackatime needs Accessibility permission to see which file and line you're working on in Xcode. It never reads your keystrokes in other apps, and your code never leaves your Mac."
+        )
         subtitle.font = .systemFont(ofSize: 13)
         subtitle.textColor = .secondaryLabelColor
         subtitle.alignment = .center
@@ -146,7 +151,7 @@ enum Onboarding {
 
         content.setCustomSpacing(22, after: subtitle)
 
-        // Steps card
+        // steps card
         let steps = NSStackView()
         steps.orientation = .vertical
         steps.alignment = .leading
@@ -162,7 +167,7 @@ enum Onboarding {
             row.orientation = .horizontal
             row.spacing = 10
             row.alignment = .centerY
-            // A fixed circle container with the digit centered inside it -
+            // a fixed circle container with the digit centered inside it.
             // sizing the text field itself leaves the digit top-aligned.
             let badge = NSView()
             badge.wantsLayer = true
@@ -205,16 +210,17 @@ enum Onboarding {
 
         content.setCustomSpacing(22, after: card)
 
-        // Action button
-        let button = NSButton(title: "Open Accessibility Settings",
-                              target: ButtonTarget.shared,
-                              action: #selector(ButtonTarget.openSettings))
+        // action button
+        let button = NSButton(
+            title: "Open Accessibility Settings",
+            target: ButtonTarget.shared,
+            action: #selector(ButtonTarget.openSettings))
         button.bezelStyle = .push
         button.controlSize = .large
         button.keyEquivalent = "\r"
         content.addArrangedSubview(button)
 
-        // Footer
+        // footer
         let footer = NSTextField(labelWithString: "This window closes by itself once tracking starts.")
         footer.font = .systemFont(ofSize: 11)
         footer.textColor = .tertiaryLabelColor

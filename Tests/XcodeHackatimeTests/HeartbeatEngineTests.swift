@@ -1,9 +1,10 @@
 import XCTest
+
 @testable import xcode_hackatime
 
-/// Policy tests for HeartbeatEngine.consider: throttling, staleness, write
-/// detection and classification, delta computation, and commit-on-success.
-/// The clock and the CLI launch are injected via the engine's test seams;
+/// policy tests for HeartbeatEngine.consider: throttling, staleness, write
+/// detection and classification, delta computation and commit-on-success.
+/// the engine's test seams inject the clock and the CLI launch;
 /// files are real temp files so mtime/line-count reads exercise real I/O.
 final class HeartbeatEngineTests: XCTestCase {
     private var engine: HeartbeatEngine!
@@ -37,9 +38,7 @@ final class HeartbeatEngineTests: XCTestCase {
 
     private func makeFile(_ name: String, lines: Int, mtime: Date) -> String {
         let path = dir.appendingPathComponent(name).path
-        let content = Array(repeating: "line", count: lines).joined(separator: "\n")
-        FileManager.default.createFile(atPath: path, contents: Data(content.utf8))
-        setMTime(path, mtime)
+        rewrite(path, lines: lines, mtime: mtime)
         return path
     }
 
@@ -81,18 +80,18 @@ final class HeartbeatEngineTests: XCTestCase {
         let b = makeFile("b.swift", lines: 3, mtime: clock)
         consider(a)
         advance(0.5)
-        consider(b) // send-worthy (file change), but within the CLI fork cap
+        consider(b)  // send-worthy (file change), but within the CLI fork cap
         XCTAssertEqual(sentArgs.count, 1)
     }
 
     func testNoopEventDoesNotConsumeTheSendSlot() {
         let a = makeFile("a.swift", lines: 3, mtime: clock)
         let b = makeFile("b.swift", lines: 3, mtime: clock)
-        consider(a) // sends
+        consider(a)  // sends
         advance(1.1)
-        consider(a) // no-op: nothing send-worthy
+        consider(a)  // no-op: nothing send-worthy
         advance(0.1)
-        consider(b) // file change, 1.2s after the last actual send
+        consider(b)  // file change, 1.2s after the last actual send
         XCTAssertEqual(sentArgs.count, 2, "a no-op event must not throttle the next real send")
         XCTAssertTrue(lastSend!.contains(b))
     }
@@ -127,9 +126,9 @@ final class HeartbeatEngineTests: XCTestCase {
 
     func testFreshMTimeAdvanceIsUserWriteWithLineDelta() {
         let file = makeFile("a.swift", lines: 3, mtime: clock)
-        consider(file) // establishes baselines (send: fileChanged)
+        consider(file)  // establishes baselines (send: fileChanged)
         advance(30)
-        rewrite(file, lines: 8, mtime: clock.addingTimeInterval(-1)) // saved a moment ago
+        rewrite(file, lines: 8, mtime: clock.addingTimeInterval(-1))  // saved a moment ago
         consider(file)
         XCTAssertEqual(sentArgs.count, 2)
         XCTAssertTrue(lastSend!.contains("--write"))
@@ -140,28 +139,41 @@ final class HeartbeatEngineTests: XCTestCase {
         let file = makeFile("a.swift", lines: 3, mtime: clock)
         consider(file)
         advance(300)
-        // Changed on disk minutes ago, first noticed now: git pull, not ⌘S.
+        // changed on disk minutes ago, first noticed now: git pull, not ⌘S.
         rewrite(file, lines: 100, mtime: clock.addingTimeInterval(-200))
         consider(file)
-        // A stale heartbeat still goes out (>120s), but without write credit.
+        // a stale heartbeat still goes out (>120s), but without write credit.
         XCTAssertEqual(sentArgs.count, 2)
         XCTAssertFalse(lastSend!.contains("--write"))
         XCTAssertNil(value(of: "--human-line-changes", in: lastSend!))
-        // And the foreign diff never surfaces as a later delta either.
+        // and the foreign diff never surfaces as a later delta either.
         advance(30)
         rewrite(file, lines: 101, mtime: clock.addingTimeInterval(-1))
         consider(file)
-        XCTAssertEqual(value(of: "--human-line-changes", in: lastSend!), "1",
-                       "delta must be measured from the post-external baseline")
+        XCTAssertEqual(
+            value(of: "--human-line-changes", in: lastSend!), "1",
+            "delta must be measured from the post-external baseline")
     }
 
     func testSaveAfterLongPauseStillCountsAsWrite() {
         let file = makeFile("a.swift", lines: 3, mtime: clock)
         consider(file)
-        advance(600) // user walks away
-        rewrite(file, lines: 4, mtime: clock.addingTimeInterval(-2)) // ⌘S on return
+        advance(600)  // user walks away
+        rewrite(file, lines: 4, mtime: clock.addingTimeInterval(-2))  // ⌘S on return
         consider(file)
         XCTAssertTrue(lastSend!.contains("--write"))
+    }
+
+    func testLargePasteDeltaIsDropped() {
+        let file = makeFile("a.swift", lines: 3, mtime: clock)
+        consider(file)
+        advance(30)
+        rewrite(file, lines: 200, mtime: clock.addingTimeInterval(-1))  // paste, not typing
+        consider(file)
+        XCTAssertTrue(lastSend!.contains("--write"))
+        XCTAssertNil(
+            value(of: "--human-line-changes", in: lastSend!),
+            "vscode-wakatime parity: >50-line jumps carry no human delta")
     }
 
     // MARK: - Commit-on-success
@@ -172,7 +184,7 @@ final class HeartbeatEngineTests: XCTestCase {
         advance(30)
         rewrite(file, lines: 8, mtime: clock.addingTimeInterval(-1))
         launchSucceeds = false
-        consider(file) // launch fails; nothing may be committed
+        consider(file)  // launch fails; nothing may be committed
         XCTAssertEqual(sentArgs.count, 1)
         launchSucceeds = true
         advance(2)
@@ -182,13 +194,28 @@ final class HeartbeatEngineTests: XCTestCase {
         XCTAssertEqual(value(of: "--human-line-changes", in: lastSend!), "5")
     }
 
+    func testClockRegressionAfterUnsentActivityStillRepairs() {
+        let a = makeFile("a.swift", lines: 3, mtime: clock)
+        consider(a)  // sends at t0
+        advance(110)
+        consider(a)  // no send, but records activity at t110
+        clock = clock.addingTimeInterval(-109)  // corrected back to t1
+        advance(5)
+        rewrite(a, lines: 8, mtime: clock.addingTimeInterval(-1))  // quiet save at t6
+        poll(a)
+        XCTAssertTrue(
+            lastSend!.contains("--write"),
+            "the repair must trigger on any backward step, not only past lastAttempt")
+        XCTAssertEqual(value(of: "--human-line-changes", in: lastSend!), "5")
+    }
+
     func testPreservedHistoricalMTimeIsExternal() {
         let file = makeFile("a.swift", lines: 3, mtime: clock.addingTimeInterval(-1))
         consider(file)
         advance(200)
-        consider(file) // stale send keeps the user's per-file activity fresh
+        consider(file)  // stale send keeps the user's per-file activity fresh
         advance(30)
-        // A tool replaced the file preserving an old timestamp: newer than
+        // a tool replaced the file and preserved an old timestamp: newer than
         // the baseline, but far from any user activity in either direction.
         rewrite(file, lines: 100, mtime: clock.addingTimeInterval(-180))
         consider(file)
@@ -199,7 +226,7 @@ final class HeartbeatEngineTests: XCTestCase {
         let file = makeFile("a.swift", lines: 3, mtime: clock)
         consider(file)
         advance(30)
-        rewrite(file, lines: 100, mtime: clock.addingTimeInterval(300)) // bogus future stamp
+        rewrite(file, lines: 100, mtime: clock.addingTimeInterval(300))  // bogus future stamp
         consider(file)
         XCTAssertEqual(sentArgs.count, 1, "future mtime must be swallowed as external")
     }
@@ -207,11 +234,11 @@ final class HeartbeatEngineTests: XCTestCase {
     func testActivityInOneFileDoesNotValidateWritesInAnother() {
         let a = makeFile("a.swift", lines: 3, mtime: clock)
         let b = makeFile("b.swift", lines: 3, mtime: clock)
-        consider(b) // b's activity baseline is established here, then goes stale
+        consider(b)  // b's activity baseline is established here, then goes stale
         advance(2)
-        consider(a) // user works in a
+        consider(a)  // user works in a
         advance(120)
-        // b changed on disk mid-way - during a's activity, but not b's.
+        // b changed on disk mid-way: during a's activity, but not b's.
         rewrite(b, lines: 100, mtime: clock.addingTimeInterval(-30))
         poll(b)
         XCTAssertEqual(sentArgs.count, 2, "activity in a must not credit b's external change")
@@ -220,12 +247,12 @@ final class HeartbeatEngineTests: XCTestCase {
     func testDeferredSendIsCoalescedNotDropped() {
         let a = makeFile("a.swift", lines: 3, mtime: clock)
         let b = makeFile("b.swift", lines: 3, mtime: clock)
-        consider(a) // sends
+        consider(a)  // sends
         advance(0.5)
-        consider(b) // send-worthy, rejected by the fork cap - must be kept
+        consider(b)  // send-worthy, rejected by the fork cap; must be kept
         XCTAssertEqual(sentArgs.count, 1)
         advance(20)
-        poll(b) // the next quiet tick flushes the deferred send
+        poll(b)  // the next quiet tick flushes the deferred send
         XCTAssertEqual(sentArgs.count, 2)
         XCTAssertTrue(lastSend!.contains(b))
     }
@@ -234,25 +261,42 @@ final class HeartbeatEngineTests: XCTestCase {
         let file = makeFile("a.swift", lines: 3, mtime: clock.addingTimeInterval(-1))
         consider(file)
         advance(30)
-        // Checkout/restore: 100-line content stamped with an OLD mtime.
+        // checkout/restore: 100-line content stamped with an OLD mtime.
         rewrite(file, lines: 100, mtime: clock.addingTimeInterval(-500))
         consider(file)
         XCTAssertEqual(sentArgs.count, 1, "backward mtime is external, not a send trigger")
         advance(2)
-        rewrite(file, lines: 103, mtime: clock.addingTimeInterval(-1)) // real user save
+        rewrite(file, lines: 103, mtime: clock.addingTimeInterval(-1))  // real user save: +3 lines
         consider(file)
         XCTAssertTrue(lastSend!.contains("--write"))
-        XCTAssertNil(value(of: "--human-line-changes", in: lastSend!),
-                     "the foreign 97-line diff must not be charged to the user")
+        XCTAssertEqual(
+            value(of: "--human-line-changes", in: lastSend!), "3",
+            "the user's +3 survives; the foreign 97-line diff does not")
     }
 
     func testClockRegressionDoesNotSuspendSends() {
         let a = makeFile("a.swift", lines: 3, mtime: clock)
         let b = makeFile("b.swift", lines: 3, mtime: clock)
         consider(a)
-        clock = clock.addingTimeInterval(-3600) // wall clock corrected backward
+        clock = clock.addingTimeInterval(-3600)  // wall clock corrected backward
         consider(b)
         XCTAssertEqual(sentArgs.count, 2, "a clock correction must not suspend tracking")
+    }
+
+    func testSaveAfterClockRegressionKeepsWriteCredit() {
+        let a = makeFile("a.swift", lines: 3, mtime: clock)
+        let b = makeFile("b.swift", lines: 3, mtime: clock)
+        consider(a)  // a's baselines stamped in the old (soon future) domain
+        advance(2)
+        clock = clock.addingTimeInterval(-3600)
+        consider(b)  // triggers the repair; a's stamps are clamped
+        advance(30)
+        rewrite(a, lines: 8, mtime: clock.addingTimeInterval(-1))  // post-correction save
+        consider(a)
+        XCTAssertTrue(
+            lastSend!.contains("--write"),
+            "the first save after a clock correction must keep its write credit")
+        XCTAssertEqual(value(of: "--human-line-changes", in: lastSend!), "5")
     }
 
     func testPollSweepsRecentlyActiveBackgroundFile() {
@@ -260,10 +304,10 @@ final class HeartbeatEngineTests: XCTestCase {
         let b = makeFile("b.swift", lines: 3, mtime: clock)
         consider(a)
         advance(2)
-        consider(b) // focus moves to b; a is now a background file
+        consider(b)  // focus moves to b; a is now a background file
         advance(10)
-        rewrite(a, lines: 8, mtime: clock.addingTimeInterval(-1)) // autosave lands on a
-        poll(b) // quiet tick sweeps recently-active files, not just the focused one
+        rewrite(a, lines: 8, mtime: clock.addingTimeInterval(-1))  // autosave lands on a
+        poll(b)  // quiet tick sweeps recently-active files, not just the focused one
         XCTAssertEqual(sentArgs.count, 3)
         XCTAssertTrue(lastSend!.contains(a))
         XCTAssertTrue(lastSend!.contains("--write"))
@@ -278,28 +322,60 @@ final class HeartbeatEngineTests: XCTestCase {
         advance(2)
         consider(b)
         advance(2)
-        consider(c) // three sends; a and b are now background files
+        consider(c)  // three sends; a and b are now background files
         advance(5)
-        for f in [a, b] { rewrite(f, lines: 8, mtime: clock) } // save-all lands at once
+        for f in [a, b] { rewrite(f, lines: 8, mtime: clock) }  // save-all lands at once
         advance(5)
-        poll(c) // tick 1: one background write sends, the other is deferred
+        poll(c)  // tick 1: one background write sends, the other is deferred
         XCTAssertEqual(sentArgs.count, 4)
         advance(20)
-        poll(c) // tick 2: the deferred write drains instead of aging out
+        poll(c)  // tick 2: the deferred write drains instead of aging out
         XCTAssertEqual(sentArgs.count, 5)
         let writes = sentArgs.suffix(2)
         XCTAssertTrue(writes.allSatisfy { $0.contains("--write") })
         XCTAssertEqual(Set(writes.compactMap { value(of: "--entity", in: $0) }), Set([a, b]))
     }
 
+    func testAlternateProjectDerivedFromProjectRoot() {
+        let proj = dir.appendingPathComponent("SparrowMail")
+        try! FileManager.default.createDirectory(
+            at: proj.appendingPathComponent("Sources"),
+            withIntermediateDirectories: true)
+        FileManager.default.createFile(
+            atPath: proj.appendingPathComponent("Package.swift").path,
+            contents: Data())
+        let file = proj.appendingPathComponent("Sources/App.swift").path
+        FileManager.default.createFile(atPath: file, contents: Data("hi".utf8))
+        setMTime(file, clock)
+        consider(file)
+        XCTAssertEqual(value(of: "--alternate-project", in: lastSend!), "SparrowMail")
+        XCTAssertEqual(value(of: "--project-folder", in: lastSend!), proj.path)
+    }
+
+    func testLinesInFileIsPassedWhenKnown() {
+        let file = makeFile("a.swift", lines: 3, mtime: clock)
+        consider(file)  // first send establishes the count
+        XCTAssertEqual(value(of: "--lines-in-file", in: lastSend!), "3")
+        advance(30)
+        rewrite(file, lines: 8, mtime: clock.addingTimeInterval(-1))
+        consider(file)
+        XCTAssertEqual(value(of: "--lines-in-file", in: lastSend!), "8")
+    }
+
+    func testNoAlternateProjectWithoutProjectRoot() {
+        let file = makeFile("loose.swift", lines: 3, mtime: clock)
+        consider(file)
+        XCTAssertNil(value(of: "--alternate-project", in: lastSend!))
+    }
+
     // MARK: - Quiet-tick disk polling
 
     func testPollSendsSaveThatLandedAfterLastEvent() {
         let file = makeFile("a.swift", lines: 3, mtime: clock)
-        consider(file) // user activity establishes baselines
+        consider(file)  // user activity establishes baselines
         advance(30)
-        // ⌘S landed 25s ago, just after the user's last event — no AX event
-        // followed it, only the timer poll notices.
+        // ⌘S landed 25s ago, just after the user's last event. no AX event
+        // followed it; only the timer poll notices.
         rewrite(file, lines: 8, mtime: clock.addingTimeInterval(-25))
         poll(file)
         XCTAssertEqual(sentArgs.count, 2)
@@ -310,7 +386,7 @@ final class HeartbeatEngineTests: XCTestCase {
     func testPollNeverSendsPlainHeartbeat() {
         let file = makeFile("a.swift", lines: 3, mtime: clock)
         consider(file)
-        advance(HeartbeatEngine.heartbeatInterval + 60) // stale, but no write
+        advance(HeartbeatEngine.heartbeatInterval + 60)  // stale, but no write
         poll(file)
         XCTAssertEqual(sentArgs.count, 1, "a quiet tick is not activity")
     }
@@ -319,19 +395,45 @@ final class HeartbeatEngineTests: XCTestCase {
         let file = makeFile("a.swift", lines: 3, mtime: clock)
         consider(file)
         advance(300)
-        // Changed on disk 200s after the user's last activity: git pull.
+        // changed on disk 200s after the user's last activity: git pull.
         rewrite(file, lines: 100, mtime: clock.addingTimeInterval(-100))
         poll(file)
         XCTAssertEqual(sentArgs.count, 1, "external change on a quiet tick must not send")
     }
 
+    func testWriteSurvivesProlongedLaunchFailureWhileEditing() {
+        let file = makeFile("a.swift", lines: 3, mtime: clock)
+        consider(file)
+        advance(30)
+        rewrite(file, lines: 8, mtime: clock.addingTimeInterval(-1))
+        launchSucceeds = false
+        consider(file)  // write detected, launch fails
+        // the user keeps editing; retries keep failing far past saveSlack,
+        // which would drift the unsent write into the external band.
+        for _ in 0..<10 {
+            advance(10)
+            consider(file)
+        }
+        launchSucceeds = true
+        advance(10)
+        consider(file)
+        XCTAssertTrue(
+            lastSend!.contains("--write"),
+            "an unsent write must never drift into the external band")
+        XCTAssertEqual(value(of: "--human-line-changes", in: lastSend!), "5")
+    }
+
     // MARK: - Args
 
-    func testLineAndCursorArePassedThrough() {
+    func testLineAndColumnArePassedThrough() {
         let file = makeFile("a.swift", lines: 3, mtime: clock)
-        engine.consider(EditorState(filePath: file, cursorOffset: 41), resolveLine: { 7 })
+        engine.consider(
+            EditorState(filePath: file, cursorOffset: 41),
+            resolvePosition: { (line: 7, column: 12) })
         XCTAssertEqual(value(of: "--lineno", in: lastSend!), "7")
-        XCTAssertEqual(value(of: "--cursorpos", in: lastSend!), "42")
+        XCTAssertEqual(
+            value(of: "--cursorpos", in: lastSend!), "12",
+            "cursorpos is the 1-based column, never the document offset")
         XCTAssertEqual(value(of: "--entity", in: lastSend!), file)
     }
 

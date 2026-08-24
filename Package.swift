@@ -13,6 +13,6 @@ let package = Package(
             name: "XcodeHackatimeTests",
             dependencies: ["xcode-hackatime"],
             path: "Tests/XcodeHackatimeTests"
-        )
+        ),
     ]
 )

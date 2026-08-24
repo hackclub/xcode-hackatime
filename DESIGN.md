@@ -18,7 +18,8 @@ config parser (wakatime-cli itself).
 | `Probe` | Diagnostic dump of Xcode's AX tree, for bug reports. |
 
 Everything runs on the main run loop. The only off-main work is the 30s
-trust probe and the CLI termination handler, both of which hop back to main
+trust probe (notification-triggered, with a 60s fallback while trusted) and
+the CLI termination handler, both of which hop back to main
 before touching anything.
 
 ## The sensing model and its limits
@@ -57,7 +58,9 @@ saves.
 | State refresh throttle | 1s | XcodeObserver.expensiveRefreshInterval | AX reads block Xcode's main thread; heartbeats are throttled harder anyway. |
 | Re-sync / quiet tick | 20s | XcodeObserver timer | Attach recovery, stale-pid reconcile, state refresh, disk-write poll. |
 | HID recency | 10s | XcodeObserver.inputRecencyWindow | Real typing produces an AX event within milliseconds of a keystroke. |
-| Trust probe | 30s | main.swift timer | Fresh-process TCC read to notice revocation. |
+| Prefix cap | 1M UTF-16 units | XcodeObserver.maxPrefixLength | Line/column is optional metadata; a multi-megabyte AX prefix fetch stalls Xcode's main thread. |
+| Paste guard | >50 lines | HeartbeatEngine (phase 4) | vscode-wakatime parity: a >50-line jump in one save is a paste/generation, not typing - the delta is dropped, the write still counts. |
+| Trust probe fallback | 10s waiting / 60s trusted | main.swift timers | Fresh-process TCC reads are primarily *event-driven* (the `com.apple.accessibility.api` distributed notification fires on any Accessibility-list change); the timers only cover missed notifications. |
 
 ## Accepted decisions
 
@@ -88,13 +91,29 @@ saves.
     users attach to bug reports. It is 0600, trimmed at 1 MB.
 11. **Deferred sends drain one per event/tick** under the fork cap; a
     save-all batch spreading over a few 20s ticks is accepted pacing.
+12. **The downloaded wakatime-cli must pass code-signature verification**
+    (`codesign --verify --strict` plus a pinned WakaTime TeamIdentifier,
+    `538RQNWSWT`) before it is made executable — the release URL is mutable
+    (`releases/latest`), so a compromised asset fails closed. The team pin
+    survives releases; a digest pin would not.
+13. **An unsent user write is pinned** (`FileBaseline.unsentWrite`) so that
+    retries after launch failures can't drift it out of the attribution
+    band into "external" while the user keeps editing.
 
 ## The TCC dance
 
 Accessibility trust is cached per-process by the AX framework, so a
 long-lived agent can never observe its own grant or revocation. Hence:
-fresh-process `check-trust` children (1/s while waiting, 1/30s while
-trusted), exit-to-relaunch on any change, the system prompt shown once per
+fresh-process `check-trust` children as the ground-truth read, triggered by
+the `com.apple.accessibility.api` distributed notification (undocumented,
+payload-free — it only ever *triggers* the supported check, so a bogus or
+missed notification degrades to the fallback timers, never to a wrong
+answer), exit-to-relaunch on any change, the system prompt shown once per
 install (`.ax-prompted`, cleared by install because replacing an ad-hoc
 binary invalidates the grant), and the onboarding window living in its own
 process so it survives the relaunch cycle.
+
+Reading the TCC SQLite database directly was considered and rejected: the
+Accessibility rows live in the SIP-protected system `TCC.db`, reading it
+requires Full Disk Access (a far heavier grant than the one being detected),
+and the schema is private and shifts across macOS releases.

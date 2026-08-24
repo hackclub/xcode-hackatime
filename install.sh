@@ -14,8 +14,15 @@ trap 'rm -rf "$TMP"' EXIT
 echo "→ downloading latest xcode-hackatime release"
 curl -fsSL -o "$TMP/xcode-hackatime.zip" "$URL"
 ditto -x -k "$TMP/xcode-hackatime.zip" "$TMP"
-chmod +x "$TMP/xcode-hackatime"
 
+# the URL is mutable (latest) and the binary is about to run: require
+# Apple's Developer ID chain and The Hack Foundation's team before executing.
+echo "→ verifying code signature"
+codesign --verify --strict \
+  '-R=anchor apple generic and certificate leaf[subject.OU] = "P6PV2R9443"' \
+  "$TMP/xcode-hackatime"
+
+chmod +x "$TMP/xcode-hackatime"
 "$TMP/xcode-hackatime" install
 
 echo ""

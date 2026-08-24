@@ -1,10 +1,10 @@
-import ApplicationServices
 import AppKit
+import ApplicationServices
 
-/// Thin helpers over the C-style AXUIElement API.
+/// thin helpers over the C-style AXUIElement API.
 enum AX {
-    /// Whether an AXObserverAddNotification result means the registration is
-    /// in place.
+    /// true when an AXObserverAddNotification result means the registration
+    /// is in place.
     static func registered(_ err: AXError) -> Bool {
         err == .success || err == .notificationAlreadyRegistered
     }
@@ -39,7 +39,7 @@ enum AX {
         return err == .success ? value : nil
     }
 
-    /// Text within `range`, fetched without materializing the whole document.
+    /// the text within `range`. the fetch does not materialize the whole document.
     static func string(_ element: AXUIElement, forRange range: CFRange) -> String? {
         var r = range
         guard let axRange = AXValueCreate(.cfRange, &r) else { return nil }
@@ -63,7 +63,7 @@ enum AX {
         return AXUIElementGetPid(element, &pid) == .success ? pid : nil
     }
 
-    /// The window containing `element`, found by walking AXParent links.
+    /// the window that contains `element`. the search walks AXParent links.
     static func window(containing element: AXUIElement) -> AXUIElement? {
         if let w = self.element(element, kAXWindowAttribute as String) { return w }
         var current: AXUIElement? = element
