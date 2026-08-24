@@ -1,6 +1,6 @@
 import AppKit
 
-/// `xcode-hackatime onboard` — a small window shown while Xcode is open but
+/// `xcode-hackatime onboard` - a small window shown while Xcode is open but
 /// Accessibility permission hasn't been granted. Spawned by the agent, which
 /// itself stays headless (it must exit/relaunch to pick up fresh TCC state;
 /// keeping the UI in this separate stable process avoids window flicker).
@@ -18,7 +18,7 @@ enum Onboarding {
 
     /// True if an onboarding window process is already alive. The onboard
     /// process holds an exclusive flock on the pid file for its lifetime, and
-    /// the kernel drops the lock the moment it dies — so unlike a pid check,
+    /// the kernel drops the lock the moment it dies - so unlike a pid check,
     /// this can't be fooled by a stale file or a recycled pid.
     static func isRunning() -> Bool {
         let fd = open(pidFile, O_RDONLY)
@@ -35,22 +35,16 @@ enum Onboarding {
     /// A dismissal from a previous Xcode run doesn't count, so quitting and
     /// reopening Xcode shows the window again.
     private static func dismissedThisXcodeSession() -> Bool {
-        guard let attrs = try? FileManager.default.attributesOfItem(atPath: dismissedMarker),
-              let dismissedAt = attrs[.modificationDate] as? Date else { return false }
-        guard let xcodeLaunch = NSWorkspace.shared.runningApplications
-            .first(where: { $0.bundleIdentifier == XcodeObserver.xcodeBundleID })?.launchDate
-        else { return true }
+        guard let dismissedAt = FileManager.default.modificationDate(atPath: dismissedMarker) else { return false }
+        guard let xcodeLaunch = XcodeObserver.runningXcode()?.launchDate else { return true }
         return dismissedAt > xcodeLaunch
     }
 
     static func spawnIfNeeded() {
         guard !isRunning(), !dismissedThisXcodeSession() else { return }
-        let process = Process()
-        // Spawn our own binary, not the installed copy — they differ when
+        // Spawn our own binary, not the installed copy - they differ when
         // running from a build directory during development.
-        process.executableURL = URL(fileURLWithPath: Installer.selfExecutablePath)
-        process.arguments = ["onboard"]
-        try? process.run()
+        Installer.spawnSelf(["onboard"], discardOutput: false)
     }
 
     static func run() -> Int32 {
@@ -78,17 +72,14 @@ enum Onboarding {
         // sense alongside a running Xcode; not a user dismissal, so it comes
         // back on the next Xcode launch).
         Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { _ in
-            if let attrs = try? FileManager.default.attributesOfItem(atPath: trustedMarker),
-               let mtime = attrs[.modificationDate] as? Date,
+            if let mtime = FileManager.default.modificationDate(atPath: trustedMarker),
                mtime > launchedAt {
                 finish(dismissedByUser: false)
             }
             if !window.isVisible {
                 finish(dismissedByUser: true)
             }
-            let xcodeRunning = NSWorkspace.shared.runningApplications
-                .contains { $0.bundleIdentifier == XcodeObserver.xcodeBundleID }
-            if !xcodeRunning {
+            if XcodeObserver.runningXcode() == nil {
                 finish(dismissedByUser: false)
             }
         }

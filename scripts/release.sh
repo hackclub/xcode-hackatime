@@ -1,6 +1,6 @@
 #!/bin/bash
 # Build, sign, and (when possible) notarize a distributable xcode-hackatime
-# release. Produces dist/xcode-hackatime-darwin-universal.zip — the stable
+# release. Produces dist/xcode-hackatime-darwin-universal.zip - the stable
 # asset name that install.sh and the hackatime_setup installer download.
 #
 # Usage: scripts/release.sh [signing-identity]
@@ -39,7 +39,7 @@ if codesign -dv "$BIN" 2>&1 | grep -q "Authority=Developer ID Application"; then
   echo "→ notarizing (waits for Apple)"
   xcrun notarytool submit "$ZIP" --keychain-profile "$KEYCHAIN_PROFILE" --wait
 else
-  echo "⚠️  not a Developer ID signature — skipping notarization."
+  echo "⚠️  not a Developer ID signature - skipping notarization."
   echo "   Users must install via install.sh / hackatime_setup (curl path);"
   echo "   browser-downloaded copies will be blocked by Gatekeeper."
 fi

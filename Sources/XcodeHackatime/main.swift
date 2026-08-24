@@ -1,40 +1,40 @@
 import ApplicationServices
 import AppKit
+import os
+
+/// System of record for diagnostics: the unified log (rotation, retention,
+/// and access control handled by the OS; stream it in Console.app or with
+/// `log show --predicate 'subsystem == "com.hackclub.hackatime..."'`).
+/// Paths are the diagnostic payload, so entries are logged .public - the
+/// store is only readable on this Mac, unlike a world-readable file.
+private let osLogger = Logger(subsystem: Installer.label, category: "agent")
 
 func logLine(_ message: String) {
+    osLogger.notice("\(message, privacy: .public)")
+    // Also print: launchd captures this to the log file (kept because logd
+    // buffers - an exit(0) right after a notice can lose the unified-log
+    // entry, and the plain file is what users attach to bug reports), and
+    // foreground `run` shows it live.
     let stamp = ISO8601DateFormatter().string(from: Date())
     print("[\(stamp)] \(message)")
     fflush(stdout)
 }
 
-/// TCC state read by a brand-new process — immune to the per-process cache.
+/// TCC state read by a brand-new process - immune to the per-process cache.
 /// nil means the check itself couldn't run (e.g. our binary briefly missing
-/// during a reinstall, transient fork pressure) — callers must not confuse
+/// during a reinstall, transient fork pressure) - callers must not confuse
 /// that with a definitive "not trusted".
 func freshTrustCheck() -> Bool? {
-    let process = Process()
-    process.executableURL = URL(fileURLWithPath: Installer.selfExecutablePath)
-    process.arguments = ["check-trust"]
-    process.standardOutput = FileHandle.nullDevice
-    process.standardError = FileHandle.nullDevice
-    guard (try? process.run()) != nil else { return nil }
+    guard let process = Installer.spawnSelf(["check-trust"], discardOutput: true) else { return nil }
     process.waitUntilExit()
     return process.terminationStatus == 0
 }
 
-/// launchd never rotates StandardOutPath, so bound it ourselves: start each
-/// agent run with a fresh file once it grows past ~1MB. Non-atomic write on
-/// purpose — it truncates the inode launchd already has open (O_APPEND), so
-/// both our stdout and future relaunches keep working.
-func trimLogIfNeeded() {
-    guard let attrs = try? FileManager.default.attributesOfItem(atPath: Installer.logPath),
-          let size = (attrs[.size] as? NSNumber)?.intValue, size > 1_000_000 else { return }
-    try? "".write(toFile: Installer.logPath, atomically: false, encoding: .utf8)
-    logLine("log trimmed (was \(size) bytes)")
-}
-
 func runAgent() -> Never {
-    trimLogIfNeeded()
+    // launchd recreates the log with default umask; it records every file
+    // path the user works on, so keep it private to this account.
+    try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: Installer.logPath)
+    Installer.trimLogIfNeeded()
     if !AXIsProcessTrusted() {
         // Show the system permission prompt only once per install: it's the
         // only way to get registered in the Accessibility list at all, but we
@@ -64,16 +64,14 @@ func runAgent() -> Never {
                 logLine("permission granted; relaunching to pick it up")
                 exit(0)
             }
-            let xcodeRunning = NSWorkspace.shared.runningApplications
-                .contains { $0.bundleIdentifier == XcodeObserver.xcodeBundleID }
-            if xcodeRunning { Onboarding.spawnIfNeeded() }
+            if XcodeObserver.runningXcode() != nil { Onboarding.spawnIfNeeded() }
         }
         logLine("still not trusted; exiting so launchd can relaunch with fresh TCC state")
         exit(0)
     }
     logLine("Accessibility permission OK")
     // Tells any onboarding window that tracking has started, so it dismisses.
-    // (Ensure the directory exists — when running from a build directory the
+    // (Ensure the directory exists - when running from a build directory the
     // install step may never have created it.)
     try? FileManager.default.createDirectory(atPath: Installer.installDir, withIntermediateDirectories: true)
     FileManager.default.createFile(atPath: Onboarding.trustedMarker, contents: Data())
@@ -87,16 +85,22 @@ func runAgent() -> Never {
     }
 
     let observer = XcodeObserver(log: logLine)
-    observer.onActivity = { state in
-        engine.consider(state)
+    observer.onActivity = { state, resolveLine in
+        engine.consider(state, resolveLine: resolveLine)
+    }
+    observer.onWritePoll = { state, resolveLine in
+        engine.pollDiskWrites(state, resolveLine: resolveLine)
     }
     observer.startWatchingWorkspace()
 
     // Notice revocation: our own AX state is cached, so ask a fresh process.
-    // Off the main queue — waitUntilExit would otherwise stall AX event
+    // Off the main queue - waitUntilExit would otherwise stall AX event
     // delivery for the child's whole lifetime on every check. Only a
     // definitive "not trusted" restarts; a failed check (nil) is retried.
     Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { _ in
+        // A trusted agent lives for the whole login session; startup-only
+        // trimming would let the log grow without bound.
+        Installer.trimLogIfNeeded()
         DispatchQueue.global(qos: .utility).async {
             guard freshTrustCheck() == false else { return }
             DispatchQueue.main.async {
@@ -109,7 +113,7 @@ func runAgent() -> Never {
     logLine("xcode-hackatime \(appVersion) running")
     // Nothing else holds engine/observer strongly (the AX callback refcon is
     // deliberately unretained, timers capture weak), and ARC frees locals at
-    // last use, not scope end — without this, an optimized build may dealloc
+    // last use, not scope end - without this, an optimized build may dealloc
     // both right here, leaving the AX callback with a dangling refcon.
     withExtendedLifetime((engine, observer)) {
         RunLoop.main.run()

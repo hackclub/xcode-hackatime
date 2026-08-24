@@ -3,6 +3,12 @@ import AppKit
 
 /// Thin helpers over the C-style AXUIElement API.
 enum AX {
+    /// Whether an AXObserverAddNotification result means the registration is
+    /// in place.
+    static func registered(_ err: AXError) -> Bool {
+        err == .success || err == .notificationAlreadyRegistered
+    }
+
     static func attribute(_ element: AXUIElement, _ name: String) -> CFTypeRef? {
         var value: CFTypeRef?
         let err = AXUIElementCopyAttributeValue(element, name as CFString, &value)

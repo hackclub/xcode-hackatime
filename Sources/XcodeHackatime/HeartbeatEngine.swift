@@ -14,28 +14,53 @@ final class HeartbeatEngine {
     private let cliPath: String
     private let pluginString: String
     private let log: (String) -> Void
+    /// A bad API key or network trouble would otherwise be invisible (the
+    /// CLI's output is discarded), so nonzero exits are at least logged.
+    private let reportCLIFailure: (Process) -> Void
 
+    /// On-disk state last committed for a file. Baselines only advance when
+    /// a heartbeat actually goes out (or an external change is deliberately
+    /// swallowed), so a failed send re-detects the same write from the
+    /// untouched baseline on the next event - no separate retry state.
+    private struct FileBaseline {
+        var mtime: Date?
+        var lineCount: Int?
+        /// When the user last acted in THIS file. Per-file, so activity in
+        /// one file can never validate an external change to another.
+        var lastActivity: Date?
+    }
+    private var baselines: [String: FileBaseline] = [:]
     private var lastFile: String?
     private var lastSent: Date = .distantPast
-    private var lastMTime: [String: Date] = [:]
-    private var lastLineCount: [String: Int] = [:]
     private var lastAttempt: Date = .distantPast
-    /// Writes whose send failed to launch, keyed by file, holding the unsent
-    /// line delta. The mtime/line-count baselines advance as soon as a write
-    /// is *observed*, so on failure the write signal must be carried here or
-    /// it would be lost for the full heartbeat interval.
-    private var pendingWrite: [String: Int] = [:]
-    /// When the last editor event of any kind reached us.
-    private var lastEvent: Date = .distantPast
-    /// A save the user makes always rides an active event stream (typing
-    /// fires AX events continuously; autosave lands mid-stream). An mtime
-    /// advance first observed after this much event silence is an external
-    /// change instead — git pull, a formatter, a generator reloading the
-    /// buffer — and must not be credited as a user write.
-    private static let externalChangeGap: TimeInterval = 60
+    /// A send-worthy event rejected by the spacing cap, kept so it can be
+    /// retried instead of silently dropped (a file switch followed by
+    /// stillness would otherwise never get its heartbeat).
+    private var pendingSendFile: String?
+    /// Write attribution: a disk change is the user's save only if it
+    /// happened within `saveSlack` of their editing in that file (autosave
+    /// trails the last keystroke), or — on a live event — within
+    /// `recentWriteWindow` before now (⌘S right after a long pause). Both
+    /// are bands, not one-sided cutoffs: an mtime far in the past (a tool
+    /// preserving timestamps) or in the future (clock skew) is external.
+    private static let saveSlack: TimeInterval = 60
+    private static let recentWriteWindow: TimeInterval = 10
+
+    /// Test seam for the clock; policy around throttling, staleness, and
+    /// write recency is untestable against the wall clock.
+    var now: () -> Date = { Date() }
+    /// Test seam: when set, replaces launching wakatime-cli (receives the
+    /// argument list, returns whether the "launch" succeeded).
+    var invokeCLIOverride: (([String]) -> Bool)?
 
     init(log: @escaping (String) -> Void) {
         self.log = log
+        self.reportCLIFailure = { p in
+            guard p.terminationStatus != 0 else { return }
+            DispatchQueue.main.async {
+                log("wakatime-cli exited with status \(p.terminationStatus) - check ~/.wakatime/wakatime.log and the api_key in ~/.wakatime.cfg")
+            }
+        }
 
         let home = FileManager.default.homeDirectoryForCurrentUser.path
         self.cliPath = "\(home)/.wakatime/wakatime-cli"
@@ -52,87 +77,148 @@ final class HeartbeatEngine {
     private static let maxTrackedFiles = 512
 
     /// Snapshot the sensor state and send a heartbeat if policy says so.
-    func consider(_ state: EditorState) {
-        guard let file = state.filePath else { return }
-        if lastMTime.count > Self.maxTrackedFiles { lastMTime.removeAll() }
-        if lastLineCount.count > Self.maxTrackedFiles { lastLineCount.removeAll() }
-        if pendingWrite.count > Self.maxTrackedFiles { pendingWrite.removeAll() }
-        let now = Date()
-        guard now.timeIntervalSince(lastAttempt) >= Self.minSpacing else { return }
-        lastAttempt = now
+    /// `resolveLine` is called only when a heartbeat actually goes out — the
+    /// AX document-prefix fetch behind it is the most expensive read, and
+    /// most events end without sending.
+    func consider(_ state: EditorState, resolveLine: () -> Int? = { nil }) {
+        process(state, userAction: true, resolveLine: resolveLine)
+    }
 
-        let sinceLastEvent = now.timeIntervalSince(lastEvent)
-        lastEvent = now
-        var isWrite = fileWasModified(file)
-        if isWrite, sinceLastEvent > Self.externalChangeGap {
-            // External change: re-baseline the line count so the foreign
-            // diff is never sent as the user's line delta, and drop the
-            // write flag. (Trade-off: an autosave that lands just after the
-            // user stops typing, noticed only after a long break, is also
-            // reclassified — a rare cosmetic loss versus crediting entire
-            // git pulls as coding.)
-            isWrite = false
-            if let count = lineCount(of: file) { lastLineCount[file] = count }
+    /// Timer-driven disk check so a save that lands *after* the last editor
+    /// event (type, ⌘S, walk away) is still credited. Only ever sends write
+    /// heartbeats — a quiet tick is not activity.
+    func pollDiskWrites(_ state: EditorState, resolveLine: () -> Int? = { nil }) {
+        process(state, userAction: false, resolveLine: resolveLine)
+        // Autosave can land on a file after the user switched away from it;
+        // sweep recently-active files so those saves aren't missed (their
+        // line/cursor is unknown by then — the write still counts).
+        let cutoff = now().addingTimeInterval(-2 * Self.saveSlack)
+        for (file, baseline) in baselines
+        where file != state.filePath && (baseline.lastActivity ?? .distantPast) > cutoff {
+            process(EditorState(filePath: file, cursorOffset: nil), userAction: false, resolveLine: { nil })
         }
-        if pendingWrite[file] != nil { isWrite = true }
-        let fileChanged = file != lastFile
-        let stale = now.timeIntervalSince(lastSent) >= Self.heartbeatInterval
-        guard fileChanged || isWrite || stale else { return }
+    }
+
+    private func process(_ state: EditorState, userAction: Bool, resolveLine: () -> Int?) {
+        guard let file = state.filePath else { return }
+        if baselines.count > Self.maxTrackedFiles { baselines.removeAll() }
+        let now = now()
+        // A backward wall-clock correction would otherwise make every
+        // spacing check negative and suspend sends until the clock catches
+        // up; one early heartbeat is the better failure mode.
+        if now < lastAttempt { lastAttempt = .distantPast; lastSent = .distantPast }
+
+        // Ground-truth write detection: the file's mtime on disk advanced
+        // since the committed baseline. Catches ⌘S and Xcode's autosave
+        // without needing any editor save event.
+        var baseline = baselines[file] ?? FileBaseline()
+        let diskMTime = FileManager.default.modificationDate(atPath: file)
+        var isWrite = false
+        if let diskMTime {
+            if let previous = baseline.mtime {
+                if diskMTime > previous {
+                    // See the saveSlack/recentWriteWindow doc for the rules.
+                    let duringActivity = baseline.lastActivity.map {
+                        abs(diskMTime.timeIntervalSince($0)) <= Self.saveSlack
+                    } ?? false
+                    let freshNow = userAction
+                        && (-1...Self.recentWriteWindow).contains(now.timeIntervalSince(diskMTime))
+                    if duringActivity || freshNow {
+                        isWrite = true
+                    } else {
+                        // External change. Swallow it: advance the mtime and
+                        // drop the line-count baseline so the foreign diff is
+                        // never sent as the user's line delta.
+                        baseline.mtime = diskMTime
+                        baseline.lineCount = nil
+                        baselines[file] = baseline
+                    }
+                } else if diskMTime < previous {
+                    // Replaced with older content (checkout, restore, a
+                    // timestamp-preserving tool): external. Re-baseline, or
+                    // the stale line count would be charged against the
+                    // user's next save.
+                    baseline.mtime = diskMTime
+                    baseline.lineCount = nil
+                    baselines[file] = baseline
+                }
+            } else {
+                // First sighting: nothing to defer yet, baseline immediately.
+                baseline.mtime = diskMTime
+                baselines[file] = baseline
+            }
+        }
+        if userAction {
+            // A sensor fact, not send bookkeeping - commit immediately.
+            // (mtime/lineCount in `baseline` are still pristine here; write
+            // commits stay deferred to send success below.)
+            baseline.lastActivity = now
+            baselines[file] = baseline
+        }
+
+        let fileChanged = userAction && file != lastFile
+        let stale = userAction && now.timeIntervalSince(lastSent) >= Self.heartbeatInterval
+        guard fileChanged || isWrite || stale || pendingSendFile == file else { return }
+
+        // The spacing cap applies to CLI invocations, not policy evaluation:
+        // a no-op event must never consume the slot of a send-worthy one.
+        // And a send-worthy event it does reject is coalesced, not dropped —
+        // the next event or quiet tick for the file retries it.
+        guard now.timeIntervalSince(lastAttempt) >= Self.minSpacing else {
+            pendingSendFile = file
+            return
+        }
+        lastAttempt = now
 
         // Net line change since the last save we saw: a single newline scan
         // of the file (never a diff), and only when a write landed on disk or
         // to establish a file's baseline - zero cost on ordinary heartbeats.
         var lineChanges: Int?
-        if isWrite || lastLineCount[file] == nil, let count = lineCount(of: file) {
-            if isWrite, let previous = lastLineCount[file], count != previous {
+        if isWrite || baseline.lineCount == nil, let count = lineCount(of: file) {
+            if isWrite, let previous = baseline.lineCount, count != previous {
                 lineChanges = count - previous
             }
-            lastLineCount[file] = count
-        }
-        if let unsentDelta = pendingWrite[file] {
-            let merged = (lineChanges ?? 0) + unsentDelta
-            lineChanges = merged == 0 ? nil : merged
+            baseline.lineCount = count
         }
 
-        // Only record the heartbeat as sent if the CLI actually launched.
-        // The write signal was consumed above (baselines advanced), so on
-        // failure carry it in pendingWrite for the next event to retry.
-        guard send(file: file, line: state.line, cursorOffset: state.cursorOffset, isWrite: isWrite, lineChanges: lineChanges) else {
-            if isWrite { pendingWrite[file] = lineChanges ?? 0 }
-            return
-        }
-        pendingWrite.removeValue(forKey: file)
+        // Commit only on a successful launch - see FileBaseline.
+        guard send(file: file, line: resolveLine(), cursorOffset: state.cursorOffset, isWrite: isWrite, lineChanges: lineChanges) else { return }
+        if pendingSendFile == file { pendingSendFile = nil }
+        if isWrite, let diskMTime { baseline.mtime = diskMTime }
+        baselines[file] = baseline
         lastFile = file
         lastSent = now
-    }
-
-    /// Ground-truth write detection: the file's mtime on disk advanced since
-    /// we last looked. Catches ⌘S and Xcode's autosave without needing any
-    /// editor save event.
-    private func fileWasModified(_ path: String) -> Bool {
-        guard let attrs = try? FileManager.default.attributesOfItem(atPath: path),
-              let mtime = attrs[.modificationDate] as? Date else { return false }
-        defer { lastMTime[path] = mtime }
-        guard let previous = lastMTime[path] else { return false }
-        return mtime > previous
     }
 
     /// Lines in the file, via a linear newline scan. Deliberately a plain
     /// read, not a mapping: we scan right after a write landed, and a mapped
     /// file truncated concurrently by another tool is a SIGBUS, not an error.
     /// Source files are small; the copy is cheap.
+    /// Skip absurdly large files: this runs synchronously on the main run
+    /// loop, and the line delta is optional metadata not worth a stall.
+    private static let maxLineCountBytes = 10_000_000
+
     private func lineCount(of path: String) -> Int? {
-        guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)) else { return nil }
+        guard let size = FileManager.default.fileSize(atPath: path), size <= Self.maxLineCountBytes,
+              let data = try? Data(contentsOf: URL(fileURLWithPath: path)) else { return nil }
         if data.isEmpty { return 0 }
         var newlines = 0
         data.withUnsafeBytes { (buf: UnsafeRawBufferPointer) in
-            for byte in buf where byte == 0x0A { newlines += 1 }
+            var cursor = buf.baseAddress!
+            let end = cursor + buf.count
+            while cursor < end, let hit = memchr(cursor, 0x0A, end - cursor) {
+                newlines += 1
+                cursor = UnsafeRawPointer(hit) + 1
+            }
         }
         return newlines + 1
     }
 
-    /// Returns true if wakatime-cli was launched (not whether it succeeded —
-    /// that's reported asynchronously by the termination handler).
+    /// Returns true if wakatime-cli was launched - deliberately not whether
+    /// it exited 0. Delivery retries are the CLI's job: it queues heartbeats
+    /// offline and resends them itself, so re-sending from here on a nonzero
+    /// exit would double-count whenever the CLI queued the heartbeat before
+    /// failing. Nonzero exits are still surfaced via the termination handler.
     private func send(file: String, line: Int?, cursorOffset: Int?, isWrite: Bool, lineChanges: Int?) -> Bool {
         var args = [
             "--entity", file,
@@ -144,34 +230,37 @@ final class HeartbeatEngine {
         if isWrite { args.append("--write") }
         if let lineChanges { args += ["--human-line-changes", String(lineChanges)] }
 
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: cliPath)
-        process.arguments = args
-        process.standardOutput = FileHandle.nullDevice
-        process.standardError = FileHandle.nullDevice
-        // A bad API key or network trouble would otherwise be invisible: the
-        // CLI's output is discarded, so at least report nonzero exits.
-        process.terminationHandler = { [log] p in
-            guard p.terminationStatus != 0 else { return }
-            DispatchQueue.main.async {
-                log("wakatime-cli exited with status \(p.terminationStatus) — check ~/.wakatime/wakatime.log and the api_key in ~/.wakatime.cfg")
+        let launched: Bool
+        if let invokeCLIOverride {
+            launched = invokeCLIOverride(args)
+        } else {
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: cliPath)
+            process.arguments = args
+            process.standardOutput = FileHandle.nullDevice
+            process.standardError = FileHandle.nullDevice
+            process.terminationHandler = reportCLIFailure
+            do {
+                try process.run()
+                launched = true
+            } catch {
+                log("failed to launch wakatime-cli: \(error)")
+                launched = false
             }
         }
-        do {
-            try process.run()
+        if launched {
             log("heartbeat: \(file) line=\(line.map(String.init) ?? "-") pos=\(cursorOffset.map { String($0 + 1) } ?? "-") write=\(isWrite)\(lineChanges.map { " lines\($0 >= 0 ? "+" : "")\($0)" } ?? "")")
-            return true
-        } catch {
-            log("failed to launch wakatime-cli: \(error)")
-            return false
         }
+        return launched
     }
 
     private static func installedXcodeVersion() -> String? {
-        // Resolve via Launch Services rather than a hardcoded path, so
-        // Xcode-beta.app and relocated installs report correctly.
-        guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: XcodeObserver.xcodeBundleID) else { return nil }
-        return Bundle(url: url)?.infoDictionary?["CFBundleShortVersionString"] as? String
+        // Prefer the Xcode that's actually running (the one we track);
+        // fall back to Launch Services' default rather than a hardcoded
+        // path, so Xcode-beta.app and relocated installs report correctly.
+        let url = XcodeObserver.runningXcode()?.bundleURL
+            ?? NSWorkspace.shared.urlForApplication(withBundleIdentifier: XcodeObserver.xcodeBundleID)
+        return url.flatMap { Bundle(url: $0)?.infoDictionary?["CFBundleShortVersionString"] as? String }
     }
 }
 

@@ -10,7 +10,7 @@ enum Probe {
             print("Grant it in System Settings → Privacy & Security → Accessibility, then re-run.")
             return 2
         }
-        guard let xcode = NSWorkspace.shared.runningApplications.first(where: { $0.bundleIdentifier == XcodeObserver.xcodeBundleID }) else {
+        guard let xcode = XcodeObserver.runningXcode() else {
             print("Xcode is not running.")
             return 1
         }

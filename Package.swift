@@ -8,6 +8,11 @@ let package = Package(
         .executableTarget(
             name: "xcode-hackatime",
             path: "Sources/XcodeHackatime"
+        ),
+        .testTarget(
+            name: "XcodeHackatimeTests",
+            dependencies: ["xcode-hackatime"],
+            path: "Tests/XcodeHackatimeTests"
         )
     ]
 )
