@@ -16,6 +16,8 @@ config parser (wakatime-cli itself).
 | `Installer` | launchd registration, wakatime-cli download, config check, log and permission hygiene. |
 | `Onboarding` | A separate process showing the Accessibility walkthrough window (separate so it survives the agent's exit/relaunch cycle without flicker). |
 | `Probe` | Diagnostic dump of Xcode's AX tree, for bug reports. |
+| `Doctor` | `doctor` checks every link in the tracking chain (agent, trust, CLI, API auth, Xcode, heartbeats, tracker conflicts) and prints a fix per failure. Reads the agent's trust from its unified-log trail, because a terminal-spawned check-trust is TCC-attributed to the terminal. |
+| `OnboardingUI` / `KeySetup` | Shared window kit for the onboarding-style windows plus the API-key setup window. |
 
 Everything runs on the main run loop. The only off-main work is the 30s
 trust probe (notification-triggered, with a 60s fallback while trusted) and
@@ -112,7 +114,18 @@ saves.
 13. **An unsent user write is pinned** (`FileBaseline.unsentWrite`) so that
     retries after launch failures can't drift it out of the attribution
     band into "external" while the user keeps editing.
-14. **WakaTime.app's Xcode tracking is auto-disabled, persistently** (remove
+14. **Onboarding windows are invitations, never gates.** every window
+    (Accessibility walkthrough, API-key setup) is closable, closing one is
+    respected without respawn nagging, and tracking proceeds independently
+    of any window's fate. completions get a visible win-state (a short
+    success flip in the window plus a one-time banner on the
+    waiting-to-trusted transition) because silence reads as "did it work?".
+    install validates the whole auth path with `wakatime-cli --today` while
+    the user is still at the terminal, spawns the walkthrough even with
+    Xcode closed (install is an explicit action, a window is expected) and
+    marks reinstalls so the walkthrough shows off-then-on toggle steps for
+    the stale Accessibility row.
+15. **WakaTime.app's Xcode tracking is auto-disabled, persistently** (remove
     `com.apple.dt.Xcode` from `wakatime_monitored_apps` in the
     `macos-wakatime.WakaTime` defaults domain, bounce the app in the
     background). Both trackers share `~/.wakatime.cfg` and the CLI - same

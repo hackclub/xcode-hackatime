@@ -15,6 +15,13 @@ enum Installer {
     /// it: a reinstall invalidates the TCC grant for ad-hoc builds, and
     /// leaving the marker would suppress the re-prompt forever.
     static var axPromptedMarker: String { installDir + "/.ax-prompted" }
+    /// touched by a reinstall over an existing binary: the Accessibility row
+    /// exists but its grant is stale, so onboarding shows off-then-on steps.
+    /// the agent removes it once trusted.
+    static var regrantMarker: String { installDir + "/.regrant-pending" }
+    /// touched while the agent waits for the grant; a trusted start that
+    /// finds it posts the one-time "tracking started" banner and removes it.
+    static var grantPendingMarker: String { installDir + "/.grant-pending" }
 
     /// absolute path to this executable. argv[0] is whatever the user typed
     /// at the shell (a bare name when found via $PATH), so never use it as
@@ -85,6 +92,7 @@ enum Installer {
             // old agent keeps its vnode across the rename; only the
             // bootout/bootstrap below replaces it).
             if selfPath != installedBinary {
+                if fm.fileExists(atPath: installedBinary) { touchMarker(regrantMarker) }
                 let staged = installedBinary + ".new"
                 try? fm.removeItem(atPath: staged)
                 try fm.copyItem(atPath: selfPath, toPath: staged)
@@ -122,7 +130,7 @@ enum Installer {
 
         disableCompetingXcodeTracker()
         let cliInstalled = ensureWakatimeCLI()
-        checkAPIKey()
+        let keyConfigured = checkAPIKey()
 
         guard cliInstalled else {
             print("")
@@ -130,6 +138,24 @@ enum Installer {
             print("   be sent. The agent is registered and will start working once")
             print("   ~/.wakatime/wakatime-cli exists. Re-run install to retry.")
             return 1
+        }
+        if keyConfigured {
+            // prove the whole auth path now, while the user is still looking
+            // at the terminal, instead of days later when stats are missing.
+            let (todayStatus, todayOut) = shell(wakatimeCLIPath, ["--today"])
+            if todayStatus == 0 {
+                print(
+                    "✓ connected to your WakaTime backend (\(todayOut.trimmingCharacters(in: .whitespacesAndNewlines)) tracked today)"
+                )
+            } else {
+                print("⚠️  wakatime-cli --today failed (exit \(todayStatus)): the api_key in")
+                print("   ~/.wakatime.cfg may be wrong. https://hackatime.hackclub.com/my/wakatime_setup")
+                print("   writes a fresh one. run 'xcode-hackatime doctor' to re-check.")
+            }
+        } else {
+            // an invitation, never a gate: the window is closable and
+            // tracking starts on its own the moment a key exists.
+            spawnSelf(["setup-key"], discardOutput: false)
         }
         print("Installed and started.")
         print("  agent:  \(installedBinary)")
@@ -140,6 +166,10 @@ enum Installer {
         print("show a prompt (or add 'xcode-hackatime' to System Settings → Privacy")
         print("& Security → Accessibility - enable it there). Tracking begins the")
         print("moment the permission is on; no restart needed.")
+        // show the walkthrough window even with Xcode closed: install is an
+        // explicit user action, so a window is expected. it self-suppresses
+        // when the agent is already tracking.
+        Onboarding.spawnIfNeeded(afterInstall: true)
         return 0
     }
 
@@ -188,7 +218,7 @@ enum Installer {
         onChange()
     }
 
-    /// event-driven guard for decision 14: watch WakaTime.app's preferences
+    /// event-driven guard for decision 15: watch WakaTime.app's preferences
     /// and re-disable its Xcode tracking the moment it reappears. the 60s
     /// tick remains the fallback for missed events. our own rewrite also
     /// fires the watcher once; the re-check is then a no-op.
@@ -199,7 +229,7 @@ enum Installer {
         }
     }
 
-    private static func competingXcodeTrackerEnabled() -> Bool {
+    static func competingXcodeTrackerEnabled() -> Bool {
         let domain = UserDefaults.standard.persistentDomain(forName: wakaTimeAppBundleID)
         let monitored = domain?[wakaTimeMonitoredKey] as? [String] ?? []
         return monitored.contains(XcodeObserver.xcodeBundleID)
@@ -334,32 +364,34 @@ enum Installer {
         return true
     }
 
-    private static func checkAPIKey() {
-        // ask wakatime-cli itself whether a key is configured. it owns the
-        // config format (INI sections, comments, WAKATIME_HOME relocation),
-        // so delegating makes it impossible for this check to drift from
-        // how the CLI actually reads the file. --config-read exits 0 only
-        // for a present, nonempty value.
+    /// ask wakatime-cli itself whether a key is configured. it owns the
+    /// config format (INI sections, comments, WAKATIME_HOME relocation), so
+    /// delegating makes it impossible for this check to drift from how the
+    /// CLI actually reads the file. --config-read exits 0 only for a
+    /// present, nonempty value.
+    static func apiKeyConfigured() -> Bool {
         let cli = wakatimeCLIPath
-        let hasKey: Bool
         if FileManager.default.isExecutableFile(atPath: cli) {
-            hasKey = ["api_key", "api_key_vault_cmd"].contains { key in
+            return ["api_key", "api_key_vault_cmd"].contains { key in
                 shell(cli, ["--config-read", key]).0 == 0
             }
-        } else {
-            // no CLI to ask (its download just failed, which install already
-            // warned about); a strict line scan still catches the common
-            // "no key at all" case for the setup hint below.
-            let cfg = NSHomeDirectory() + "/.wakatime.cfg"
-            let contents = (try? String(contentsOfFile: cfg, encoding: .utf8)) ?? ""
-            hasKey = contents.split(separator: "\n").contains { line in
-                let parts = line.split(separator: "=", maxSplits: 1)
-                guard parts.count == 2 else { return false }
-                let key = parts[0].trimmingCharacters(in: .whitespaces)
-                let value = parts[1].trimmingCharacters(in: .whitespaces)
-                return (key == "api_key" || key == "api_key_vault_cmd") && !value.isEmpty
-            }
         }
+        // no CLI to ask (its download just failed, which install already
+        // warned about); a strict line scan still catches the common
+        // "no key at all" case for the setup hint.
+        let cfg = NSHomeDirectory() + "/.wakatime.cfg"
+        let contents = (try? String(contentsOfFile: cfg, encoding: .utf8)) ?? ""
+        return contents.split(separator: "\n").contains { line in
+            let parts = line.split(separator: "=", maxSplits: 1)
+            guard parts.count == 2 else { return false }
+            let key = parts[0].trimmingCharacters(in: .whitespaces)
+            let value = parts[1].trimmingCharacters(in: .whitespaces)
+            return (key == "api_key" || key == "api_key_vault_cmd") && !value.isEmpty
+        }
+    }
+
+    private static func checkAPIKey() -> Bool {
+        let hasKey = apiKeyConfigured()
         if !hasKey {
             print("")
             print("⚠️  No api_key found in ~/.wakatime.cfg.")
@@ -369,6 +401,7 @@ enum Installer {
             print("     [settings]")
             print("     api_key = YOUR-KEY")
         }
+        return hasKey
     }
 
     static func uninstall() -> Int32 {
@@ -407,7 +440,7 @@ enum Installer {
         for path in [
             plistPath, installedBinary, logPath,
             Onboarding.trustedMarker, Onboarding.dismissedMarker,
-            Onboarding.pidFile, axPromptedMarker,
+            Onboarding.pidFile, axPromptedMarker, regrantMarker, grantPendingMarker,
         ]
         where fm.fileExists(atPath: path) {
             do { try fm.removeItem(atPath: path) } catch {
@@ -470,7 +503,7 @@ enum Installer {
     }
 
     @discardableResult
-    private static func shell(_ path: String, _ args: [String]) -> (Int32, String) {
+    static func shell(_ path: String, _ args: [String]) -> (Int32, String) {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: path)
         p.arguments = args

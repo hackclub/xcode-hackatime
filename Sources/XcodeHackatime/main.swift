@@ -75,6 +75,9 @@ func runAgent() -> Never {
             _ = AXIsProcessTrustedWithOptions(options)
         }
         logLine("waiting for Accessibility permission…")
+        // a trusted start that finds this marker knows onboarding just
+        // completed and posts the one-time "tracking started" banner.
+        Installer.touchMarker(Installer.grantPendingMarker)
         // a TCC grant does not propagate to an already-running process (the
         // AX framework caches the denial), but a *fresh* process always
         // reads fresh TCC state. so the checks below spawn ourselves as a
@@ -112,6 +115,15 @@ func runAgent() -> Never {
         exit(0)
     }
     logLine("Accessibility permission OK")
+    // close the onboarding loop: transitioning from waiting to trusted
+    // deserves a visible win-state, not silence. once per grant cycle.
+    if FileManager.default.fileExists(atPath: Installer.grantPendingMarker) {
+        try? FileManager.default.removeItem(atPath: Installer.grantPendingMarker)
+        Installer.shell(
+            "/usr/bin/osascript",
+            ["-e", "display notification \"You're all set - Xcode time counts from now.\" with title \"Hackatime\""])
+    }
+    try? FileManager.default.removeItem(atPath: Installer.regrantMarker)
     // tells any onboarding window that tracking has started, so it dismisses.
     Installer.touchMarker(Onboarding.trustedMarker)
     // a past "user closed the onboarding window" no longer applies once
@@ -188,6 +200,10 @@ case "run":
     runAgent()
 case "check-trust":
     exit(AXIsProcessTrusted() ? 0 : 1)
+case "doctor":
+    exit(Doctor.run())
+case "setup-key":
+    exit(KeySetup.run())
 case "onboard":
     exit(Onboarding.run())
 case "probe":
@@ -212,6 +228,7 @@ default:
           uninstall   stop and remove the launchd agent
           status      show agent state and recent log lines
           run         run the tracker in the foreground (used by launchd)
+          doctor      check every link in the tracking chain, with fixes
           probe       dump Xcode's Accessibility tree state (diagnostics)
           version     print the version
         """)
