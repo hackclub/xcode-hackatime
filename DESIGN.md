@@ -28,9 +28,16 @@ The AX API has no save event and no "user did this" bit, so everything is
 inferred:
 
 - **The file path** comes from the window's `AXDocument`, which follows the
-  *focused* editor pane. Live-verified in split view: two panes with
-  different files, the document and heartbeat attribution flip with focus
-  in both directions.
+  *focused* editor pane. Live-verified across three split panes and across
+  multiple windows: the document and heartbeat attribution flip with focus
+  in every direction, and a loose-file window past the prefix cap sends
+  writes without line/column instead of stalling Xcode.
+- **Code review (comparison) mode fails safe.** on entry, keyboard focus
+  moves to a non-editor element (`Xcode.WorkspaceWindow`), so the sensor
+  goes quiet instead of misattributing; `AXDocument` stays correct
+  throughout. tracking resumes when focus returns to a source editor. the
+  worst case is undercounting seconds spent in a diff-reading mode, never
+  overcounting.
 - **Writes** come from mtime advances over a per-file committed baseline.
 - **Attribution** comes from timing bands (`WriteClassifier`): a save rides
   the user's editing in that file, or is fresh on a live event; everything
