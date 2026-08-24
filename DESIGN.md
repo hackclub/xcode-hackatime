@@ -27,6 +27,10 @@ before touching anything.
 The AX API has no save event and no "user did this" bit, so everything is
 inferred:
 
+- **The file path** comes from the window's `AXDocument`, which follows the
+  *focused* editor pane. Live-verified in split view: two panes with
+  different files, the document and heartbeat attribution flip with focus
+  in both directions.
 - **Writes** come from mtime advances over a per-file committed baseline.
 - **Attribution** comes from timing bands (`WriteClassifier`): a save rides
   the user's editing in that file, or is fresh on a live event; everything
