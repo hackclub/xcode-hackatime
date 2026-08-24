@@ -10,7 +10,14 @@ import os
 private let osLogger = Logger(subsystem: Installer.label, category: "agent")
 
 func logLine(_ message: String) {
-    osLogger.notice("\(message, privacy: .public)")
+    // the codebase-wide convention marks problems with a "warning:" prefix;
+    // route those to the error level so Console and log-show predicates can
+    // filter them from routine chatter.
+    if message.hasPrefix("warning:") {
+        osLogger.error("\(message, privacy: .public)")
+    } else {
+        osLogger.notice("\(message, privacy: .public)")
+    }
     // also print, for live output in foreground runs. under launchd stdout
     // is discarded; the unified log is the record, and the log file only
     // captures stderr (crash traces).
