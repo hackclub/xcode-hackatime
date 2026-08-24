@@ -209,7 +209,10 @@ enum Installer {
             print("warning: could not move verified wakatime-cli into place")
             return false
         }
-        if fm.fileExists(atPath: cli) {
+        // fileExists follows symlinks, so a dangling link reads as absent
+        // and would wedge every reinstall on "file exists". check for the
+        // link itself too.
+        if fm.fileExists(atPath: cli) || (try? fm.destinationOfSymbolicLink(atPath: cli)) != nil {
             do { try fm.removeItem(atPath: cli) } catch {
                 print("warning: could not replace existing \(cli): \(error.localizedDescription)")
                 return false
