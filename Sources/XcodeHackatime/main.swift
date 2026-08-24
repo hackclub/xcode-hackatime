@@ -11,13 +11,20 @@ private let osLogger = Logger(subsystem: Installer.label, category: "agent")
 
 func logLine(_ message: String) {
     osLogger.notice("\(message, privacy: .public)")
-    // also print: launchd captures this to the log file (kept because logd
-    // buffers; an exit(0) right after a notice can lose the unified-log
-    // entry, and the plain file is what users attach to bug reports), and
-    // foreground `run` shows it live.
+    // also print, for live output in foreground runs. under launchd stdout
+    // is discarded; the unified log is the record, and the log file only
+    // captures stderr (crash traces).
     let stamp = ISO8601DateFormatter().string(from: Date())
     print("[\(stamp)] \(message)")
     fflush(stdout)
+}
+
+/// logd buffers asynchronously and an instant exit can lose the final
+/// entry; the unified log is the only record now, so give it a moment.
+func logAndExit(_ message: String) -> Never {
+    logLine(message)
+    Thread.sleep(forTimeInterval: 0.3)
+    exit(0)
 }
 
 /// TCC state read by a brand-new process, immune to the per-process cache.
@@ -74,8 +81,7 @@ func runAgent() -> Never {
         // process, so it survives our relaunch cycle without flicker).
         let checkTrustAndMaybeRelaunch = {
             if freshTrustCheck() == true {
-                logLine("permission granted; relaunching to pick it up")
-                exit(0)
+                logAndExit("permission granted; relaunching to pick it up")
             }
         }
         let tick = {
@@ -93,8 +99,7 @@ func runAgent() -> Never {
         // exit periodically regardless, so launchd relaunches us with a
         // clean slate.
         Timer.scheduledTimer(withTimeInterval: 60, repeats: false) { _ in
-            logLine("still not trusted; exiting so launchd can relaunch with fresh TCC state")
-            exit(0)
+            logAndExit("still not trusted; exiting so launchd can relaunch with fresh TCC state")
         }
         RunLoop.main.run()
         exit(0)
@@ -142,8 +147,7 @@ func runAgent() -> Never {
         DispatchQueue.global(qos: .utility).async {
             guard freshTrustCheck() == false else { return }
             DispatchQueue.main.async {
-                logLine("Accessibility permission revoked; restarting into onboarding")
-                exit(0)
+                logAndExit("Accessibility permission revoked; restarting into onboarding")
             }
         }
     }

@@ -49,11 +49,12 @@ enum Installer {
         FileManager.default.createFile(atPath: path, contents: Data())
     }
 
-    /// launchd never rotates StandardOutPath, so bound it ourselves: start
-    /// each agent run with a fresh file once it grows past ~1MB. the write
-    /// is non-atomic on purpose. it truncates the inode launchd already has
-    /// open (O_APPEND), so both our stdout and future relaunches keep
-    /// working.
+    /// the file only holds stderr (crash traces) and launchd never rotates
+    /// it; a crash LOOP would grow it without bound, so every agent start
+    /// trims past ~1MB. startup-only is enough: a crash loop relaunches
+    /// constantly, so trims happen constantly too. the write is non-atomic
+    /// on purpose. it truncates the inode launchd already has open
+    /// (O_APPEND), so future relaunches keep appending correctly.
     static func trimLogIfNeeded() {
         guard let size = FileManager.default.fileSize(atPath: logPath), size > 1_000_000 else { return }
         try? "".write(toFile: logPath, atomically: false, encoding: .utf8)
@@ -93,12 +94,14 @@ enum Installer {
                 }
             }
 
+            // no StandardOutPath: the unified log is the record for normal
+            // output (the OS rotates and protects it). the file only
+            // captures stderr, which the unified log cannot: crash traces.
             let plist: [String: Any] = [
                 "Label": label,
                 "ProgramArguments": [installedBinary, "run"],
                 "RunAtLoad": true,
                 "KeepAlive": true,
-                "StandardOutPath": logPath,
                 "StandardErrorPath": logPath,
             ]
             let data = try PropertyListSerialization.data(fromPropertyList: plist, format: .xml, options: 0)

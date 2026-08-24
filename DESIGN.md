@@ -71,7 +71,7 @@ saves.
 | HID recency | 10s | XcodeObserver.inputRecencyWindow | Real typing produces an AX event within milliseconds of a keystroke. |
 | Prefix cap | 1M UTF-16 units | XcodeObserver.maxPrefixLength | Line/column is optional metadata; a multi-megabyte AX prefix fetch stalls Xcode's main thread. |
 | Paste guard | \|delta\| > 50 lines | HeartbeatEngine (phase 4) | a >50-line jump in either direction in one save is a paste, generation or bulk delete, not typing - the delta is dropped, the write still counts. (Symmetric, unlike vscode-wakatime's positive-only guard; a live -99 external cleanup proved the need.) |
-| Trust probe fallback | 10s waiting / 300s trusted | main.swift timers | Fresh-process TCC reads are primarily *event-driven* (the `com.apple.accessibility.api` distributed notification fires on any Accessibility-list change); the timers only cover missed notifications, and the trusted-side fallback shares the 5-minute maintenance tick with log trimming. |
+| Trust probe fallback | 10s waiting / 300s trusted | main.swift timers | Fresh-process TCC reads are primarily *event-driven* (the `com.apple.accessibility.api` distributed notification fires on any Accessibility-list change); the timers only cover missed notifications; the trusted-side fallback is the 5-minute maintenance tick's sole remaining job. |
 
 ## Accepted decisions
 
@@ -94,12 +94,14 @@ saves.
 9. **Wall-clock `Date` everywhere, with explicit backward-correction
    repair** (`repairedNow`), instead of a monotonic clock — it keeps the
    test clock seam and the mtime comparisons in one time domain.
-10. **Logging is dual on purpose.** The unified log (os.Logger, subsystem =
-    the launchd label) is the system of record — rotation, retention, and
-    access control handled by the OS. The launchd-captured file stays
-    because logd buffers can lose entries written immediately before
-    `exit(0)` (which this agent does by design), and the plain file is what
-    users attach to bug reports. It is 0600, trimmed at 1 MB.
+10. **The unified log is the only record of normal output** (os.Logger,
+    subsystem = the launchd label) — rotation, retention and access control
+    handled by the OS; `status` prints its tail. The file at logPath only
+    captures **stderr** (crash traces, which the unified log cannot see);
+    launchd has no StandardOutPath. Log-then-exit sites use `logAndExit`,
+    which gives logd a 300ms grace so an instant exit does not lose the
+    final entry. The file is 0600 and trimmed past 1 MB at agent start,
+    which also bounds crash loops (every relaunch trims).
 11. **Deferred sends drain one per event/tick** under the fork cap; a
     save-all batch spreading over a few 20s ticks is accepted pacing.
 12. **The downloaded wakatime-cli must pass code-signature verification**
