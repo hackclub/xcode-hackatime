@@ -76,7 +76,7 @@ final class HeartbeatEngineTests: XCTestCase {
         XCTAssertFalse(lastSend!.contains("--write"), "first sighting is not a write")
     }
 
-    func testSendsWithinMinSpacingAreDropped() {
+    func testSendsWithinMinSpacingAreDeferred() {
         let a = makeFile("a.swift", lines: 3, mtime: clock)
         let b = makeFile("b.swift", lines: 3, mtime: clock)
         consider(a)
@@ -268,6 +268,28 @@ final class HeartbeatEngineTests: XCTestCase {
         XCTAssertTrue(lastSend!.contains(a))
         XCTAssertTrue(lastSend!.contains("--write"))
         XCTAssertEqual(value(of: "--human-line-changes", in: lastSend!), "5")
+    }
+
+    func testBatchOfBackgroundWritesDrainsAcrossTicks() {
+        let a = makeFile("a.swift", lines: 3, mtime: clock)
+        let b = makeFile("b.swift", lines: 3, mtime: clock)
+        let c = makeFile("c.swift", lines: 3, mtime: clock)
+        consider(a)
+        advance(2)
+        consider(b)
+        advance(2)
+        consider(c) // three sends; a and b are now background files
+        advance(5)
+        for f in [a, b] { rewrite(f, lines: 8, mtime: clock) } // save-all lands at once
+        advance(5)
+        poll(c) // tick 1: one background write sends, the other is deferred
+        XCTAssertEqual(sentArgs.count, 4)
+        advance(20)
+        poll(c) // tick 2: the deferred write drains instead of aging out
+        XCTAssertEqual(sentArgs.count, 5)
+        let writes = sentArgs.suffix(2)
+        XCTAssertTrue(writes.allSatisfy { $0.contains("--write") })
+        XCTAssertEqual(Set(writes.compactMap { value(of: "--entity", in: $0) }), Set([a, b]))
     }
 
     // MARK: - Quiet-tick disk polling

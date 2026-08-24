@@ -1,3 +1,12 @@
+> [!WARNING]  
+> This is currently unreleased for a reason!
+>
+> This codebase was heavily written with Fable and GPT-5.6 Sol. And whilst it works on my
+> machine, I do still want to verify that this works across macOS versions and clean up the
+> code a bit. Beware!
+
+---
+
 # xcode-hackatime
 
 WakaTime time tracking for Xcode - with accurate `lineno`, `cursorpos`, file

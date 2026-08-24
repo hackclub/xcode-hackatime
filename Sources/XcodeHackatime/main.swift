@@ -42,7 +42,7 @@ func runAgent() -> Never {
         // and re-prompting on every relaunch nags the user with popups. After
         // the first prompt the row exists in System Settings, and the
         // onboarding window carries the instructions.
-        let promptMarker = Installer.installDir + "/.ax-prompted"
+        let promptMarker = Installer.axPromptedMarker
         if !FileManager.default.fileExists(atPath: promptMarker) {
             try? FileManager.default.createDirectory(atPath: Installer.installDir, withIntermediateDirectories: true)
             FileManager.default.createFile(atPath: promptMarker, contents: Data())

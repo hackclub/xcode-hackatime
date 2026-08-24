@@ -6,10 +6,24 @@ import AppKit
 /// changed, when a write happened, or when ≥2 minutes passed since the last
 /// heartbeat for the same file.
 final class HeartbeatEngine {
+    // MARK: - Tuning
+    // How these dials relate to each other, to the observer's timers, and to
+    // WriteClassifier's attribution windows is laid out in DESIGN.md.
+
+    /// Same-file heartbeats at most this often (the standard plugin rule).
     static let heartbeatInterval: TimeInterval = 120
-    /// Minimum spacing between consecutive CLI invocations, so a burst of AX
-    /// events can never fork more than one process per second.
+    /// Consecutive CLI forks at least this far apart; rejected sends are
+    /// coalesced into pendingSendFiles, never dropped.
     private static let minSpacing: TimeInterval = 1
+    /// Per-file baselines live for the agent's whole login session; reset
+    /// past this count instead of growing without bound (a reset just
+    /// re-establishes baselines).
+    private static let maxTrackedFiles = 512
+    /// The quiet-tick sweep covers files the user touched this recently.
+    private static let sweepWindow: TimeInterval = 2 * WriteClassifier.saveSlack
+    /// lineCount skips files past this size - it's synchronous I/O on the
+    /// main run loop, and the line delta is optional metadata.
+    private static let maxLineCountBytes = 10_000_000
 
     private let cliPath: String
     private let pluginString: String
@@ -33,18 +47,11 @@ final class HeartbeatEngine {
     private var lastFile: String?
     private var lastSent: Date = .distantPast
     private var lastAttempt: Date = .distantPast
-    /// A send-worthy event rejected by the spacing cap, kept so it can be
+    /// Send-worthy events rejected by the spacing cap, kept so they can be
     /// retried instead of silently dropped (a file switch followed by
-    /// stillness would otherwise never get its heartbeat).
-    private var pendingSendFile: String?
-    /// Write attribution: a disk change is the user's save only if it
-    /// happened within `saveSlack` of their editing in that file (autosave
-    /// trails the last keystroke), or — on a live event — within
-    /// `recentWriteWindow` before now (⌘S right after a long pause). Both
-    /// are bands, not one-sided cutoffs: an mtime far in the past (a tool
-    /// preserving timestamps) or in the future (clock skew) is external.
-    private static let saveSlack: TimeInterval = 60
-    private static let recentWriteWindow: TimeInterval = 10
+    /// stillness, or a multi-file autosave batch draining one send per
+    /// tick, would otherwise lose heartbeats).
+    private var pendingSendFiles: Set<String> = []
 
     /// Test seam for the clock; policy around throttling, staleness, and
     /// write recency is untestable against the wall clock.
@@ -71,11 +78,6 @@ final class HeartbeatEngine {
 
     var cliExists: Bool { FileManager.default.isExecutableFile(atPath: cliPath) }
 
-    /// Per-file baselines live for the agent's whole login session; reset
-    /// them on the rare traversal of this many distinct files rather than
-    /// growing without bound (a reset just re-establishes baselines).
-    private static let maxTrackedFiles = 512
-
     /// Snapshot the sensor state and send a heartbeat if policy says so.
     /// `resolveLine` is called only when a heartbeat actually goes out — the
     /// AX document-prefix fetch behind it is the most expensive read, and
@@ -92,87 +94,64 @@ final class HeartbeatEngine {
         // Autosave can land on a file after the user switched away from it;
         // sweep recently-active files so those saves aren't missed (their
         // line/cursor is unknown by then — the write still counts).
-        let cutoff = now().addingTimeInterval(-2 * Self.saveSlack)
-        for (file, baseline) in baselines
-        where file != state.filePath && (baseline.lastActivity ?? .distantPast) > cutoff {
+        let cutoff = now().addingTimeInterval(-Self.sweepWindow)
+        let recent = baselines.filter { ($0.value.lastActivity ?? .distantPast) > cutoff }.keys
+        // Deferred sends are swept regardless of recency, or a batch that
+        // drains one send per tick would age out of the window unsent.
+        for file in Set(recent).union(pendingSendFiles) where file != state.filePath {
             process(EditorState(filePath: file, cursorOffset: nil), userAction: false, resolveLine: { nil })
         }
     }
 
     private func process(_ state: EditorState, userAction: Bool, resolveLine: () -> Int?) {
         guard let file = state.filePath else { return }
-        if baselines.count > Self.maxTrackedFiles { baselines.removeAll() }
-        let now = now()
-        // A backward wall-clock correction would otherwise make every
-        // spacing check negative and suspend sends until the clock catches
-        // up; one early heartbeat is the better failure mode.
-        if now < lastAttempt { lastAttempt = .distantPast; lastSent = .distantPast }
+        evictIfNeeded()
+        let now = repairedNow()
 
-        // Ground-truth write detection: the file's mtime on disk advanced
-        // since the committed baseline. Catches ⌘S and Xcode's autosave
-        // without needing any editor save event.
+        // 1. Classify what the disk says happened to this file (the truth
+        //    table lives on WriteClassifier).
         var baseline = baselines[file] ?? FileBaseline()
         let diskMTime = FileManager.default.modificationDate(atPath: file)
-        var isWrite = false
-        if let diskMTime {
-            if let previous = baseline.mtime {
-                if diskMTime > previous {
-                    // See the saveSlack/recentWriteWindow doc for the rules.
-                    let duringActivity = baseline.lastActivity.map {
-                        abs(diskMTime.timeIntervalSince($0)) <= Self.saveSlack
-                    } ?? false
-                    let freshNow = userAction
-                        && (-1...Self.recentWriteWindow).contains(now.timeIntervalSince(diskMTime))
-                    if duringActivity || freshNow {
-                        isWrite = true
-                    } else {
-                        // External change. Swallow it: advance the mtime and
-                        // drop the line-count baseline so the foreign diff is
-                        // never sent as the user's line delta.
-                        baseline.mtime = diskMTime
-                        baseline.lineCount = nil
-                        baselines[file] = baseline
-                    }
-                } else if diskMTime < previous {
-                    // Replaced with older content (checkout, restore, a
-                    // timestamp-preserving tool): external. Re-baseline, or
-                    // the stale line count would be charged against the
-                    // user's next save.
-                    baseline.mtime = diskMTime
-                    baseline.lineCount = nil
-                    baselines[file] = baseline
-                }
-            } else {
-                // First sighting: nothing to defer yet, baseline immediately.
-                baseline.mtime = diskMTime
-                baselines[file] = baseline
-            }
+        let verdict = WriteClassifier.classify(diskMTime: diskMTime, baselineMTime: baseline.mtime,
+                                               lastActivity: baseline.lastActivity,
+                                               now: now, userAction: userAction)
+        let isWrite = verdict == .userWrite
+        switch verdict {
+        case .baseline:
+            baseline.mtime = diskMTime
+            baselines[file] = baseline
+        case .external:
+            // Never attribute the foreign diff: advance the mtime and drop
+            // the line baseline (it re-establishes on the next send).
+            baseline.mtime = diskMTime
+            baseline.lineCount = nil
+            baselines[file] = baseline
+        case .unchanged, .userWrite:
+            break // a user write commits only on send success - see FileBaseline
         }
         if userAction {
             // A sensor fact, not send bookkeeping - commit immediately.
-            // (mtime/lineCount in `baseline` are still pristine here; write
-            // commits stay deferred to send success below.)
+            // (mtime/lineCount in `baseline` are still pristine here.)
             baseline.lastActivity = now
             baselines[file] = baseline
         }
 
+        // 2. Decide whether this deserves a heartbeat.
         let fileChanged = userAction && file != lastFile
         let stale = userAction && now.timeIntervalSince(lastSent) >= Self.heartbeatInterval
-        guard fileChanged || isWrite || stale || pendingSendFile == file else { return }
+        guard fileChanged || isWrite || stale || pendingSendFiles.contains(file) else { return }
 
-        // The spacing cap applies to CLI invocations, not policy evaluation:
-        // a no-op event must never consume the slot of a send-worthy one.
-        // And a send-worthy event it does reject is coalesced, not dropped —
-        // the next event or quiet tick for the file retries it.
+        // 3. Respect the CLI fork cap - coalescing, never dropping: the next
+        //    event or quiet tick for the file retries a rejected send.
         guard now.timeIntervalSince(lastAttempt) >= Self.minSpacing else {
-            pendingSendFile = file
+            pendingSendFiles.insert(file)
             return
         }
         lastAttempt = now
 
-        // Net line change since the last save we saw: a single newline scan
-        // of the file (never a diff), and only when a write landed on disk or
-        // to establish a file's baseline - zero cost on ordinary heartbeats.
+        // 4. Net line change since the last save we saw: a single newline
+        //    scan (never a diff), and only when a write landed or to
+        //    establish a baseline - zero cost on ordinary heartbeats.
         var lineChanges: Int?
         if isWrite || baseline.lineCount == nil, let count = lineCount(of: file) {
             if isWrite, let previous = baseline.lineCount, count != previous {
@@ -181,23 +160,34 @@ final class HeartbeatEngine {
             baseline.lineCount = count
         }
 
-        // Commit only on a successful launch - see FileBaseline.
+        // 5. Send, then commit - only on a successful launch (FileBaseline).
         guard send(file: file, line: resolveLine(), cursorOffset: state.cursorOffset, isWrite: isWrite, lineChanges: lineChanges) else { return }
-        if pendingSendFile == file { pendingSendFile = nil }
+        pendingSendFiles.remove(file)
         if isWrite, let diskMTime { baseline.mtime = diskMTime }
         baselines[file] = baseline
         lastFile = file
         lastSent = now
     }
 
+    private func evictIfNeeded() {
+        guard baselines.count > Self.maxTrackedFiles else { return }
+        baselines.removeAll()
+        pendingSendFiles.removeAll()
+    }
+
+    /// The wall clock, with backward corrections repaired: a negative jump
+    /// would make every spacing check fail and suspend sends until real time
+    /// catches up; one early heartbeat is the better failure mode.
+    private func repairedNow() -> Date {
+        let now = now()
+        if now < lastAttempt { lastAttempt = .distantPast; lastSent = .distantPast }
+        return now
+    }
+
     /// Lines in the file, via a linear newline scan. Deliberately a plain
     /// read, not a mapping: we scan right after a write landed, and a mapped
     /// file truncated concurrently by another tool is a SIGBUS, not an error.
     /// Source files are small; the copy is cheap.
-    /// Skip absurdly large files: this runs synchronously on the main run
-    /// loop, and the line delta is optional metadata not worth a stall.
-    private static let maxLineCountBytes = 10_000_000
-
     private func lineCount(of path: String) -> Int? {
         guard let size = FileManager.default.fileSize(atPath: path), size <= Self.maxLineCountBytes,
               let data = try? Data(contentsOf: URL(fileURLWithPath: path)) else { return nil }

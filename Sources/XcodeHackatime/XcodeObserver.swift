@@ -175,7 +175,6 @@ final class XcodeObserver {
         }
 
         let refcon = Unmanaged.passUnretained(self).toOpaque()
-        var editorChanged = false
         if let previous = trackedEditor, CFEqual(previous, focused) == false {
             AXObserverRemoveNotification(obs, previous, kAXSelectedTextChangedNotification as CFString)
             AXObserverRemoveNotification(obs, previous, kAXValueChangedNotification as CFString)
@@ -186,7 +185,6 @@ final class XcodeObserver {
             let valErr = AXObserverAddNotification(obs, focused, kAXValueChangedNotification as CFString, refcon)
             if AX.registered(selErr), AX.registered(valErr) {
                 trackedEditor = focused
-                editorChanged = true
             } else {
                 // Element mid-teardown; drop any partial registration and let
                 // the next focus event or the 20s re-sync retry.
@@ -197,13 +195,13 @@ final class XcodeObserver {
         }
 
         if synthetic {
-            // Expensive AX reads block Xcode's main thread, so a 20s re-sync
-            // refreshes state only when the focused editor actually changed
-            // under us - and never reports activity.
-            if editorChanged {
-                lastExpensiveUpdate = .distantPast
-                _ = updateCursor(from: focused)
-            }
+            // Re-syncs never count as user activity, but they always refresh
+            // state: an in-pane file swap throttled away at event time would
+            // otherwise leave path/cursor stuck on the old file until the
+            // next real event - and quiet-tick polls would poll the old
+            // path. Cheap, since the document-prefix fetch is send-time only.
+            lastExpensiveUpdate = .distantPast
+            _ = updateCursor(from: focused)
             return
         }
         lastExpensiveUpdate = .distantPast
@@ -291,11 +289,11 @@ final class XcodeObserver {
         return true
     }
 
-    /// Minimum spacing between the expensive AX reads (the document-prefix
-    /// fetch for the line number and the parent walk for the file path).
-    /// Every AX read blocks Xcode's main thread while it's serviced, and
-    /// heartbeats are throttled harder than this anyway - so per-keystroke
-    /// freshness buys nothing.
+    /// Minimum spacing between per-event state refreshes (selected range,
+    /// window walk, AXDocument read; the heavy document-prefix line fetch is
+    /// deferred to send time). Every AX read blocks Xcode's main thread
+    /// while it's serviced, and heartbeats are throttled harder than this
+    /// anyway - so per-keystroke freshness buys nothing.
     private static let expensiveRefreshInterval: TimeInterval = 1
     private var lastExpensiveUpdate: Date = .distantPast
 
