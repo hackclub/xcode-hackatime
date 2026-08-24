@@ -106,6 +106,14 @@ func runAgent() -> Never {
     // trusted; clear it so onboarding returns if permission is ever revoked.
     try? FileManager.default.removeItem(atPath: Onboarding.dismissedMarker)
 
+    // detection only at runtime: install auto-disables, but if the user
+    // re-enabled it deliberately, warn instead of fighting them.
+    if Installer.competingXcodeTrackerEnabled() {
+        logLine(
+            "warning: WakaTime.app is also tracking Xcode - every heartbeat double-counts. run 'xcode-hackatime install' to disable it, or turn Xcode off in WakaTime.app's monitored apps"
+        )
+    }
+
     let engine = HeartbeatEngine(log: logLine)
     if !engine.cliExists {
         logLine(

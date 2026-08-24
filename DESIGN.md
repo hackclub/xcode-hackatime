@@ -99,6 +99,13 @@ saves.
 13. **An unsent user write is pinned** (`FileBaseline.unsentWrite`) so that
     retries after launch failures can't drift it out of the attribution
     band into "external" while the user keeps editing.
+14. **Install auto-disables WakaTime.app's Xcode tracking** (removes
+    `com.apple.dt.Xcode` from `wakatime_monitored_apps` in the
+    `macos-wakatime.WakaTime` defaults domain and bounces the app in the
+    background) because running both double-counts every heartbeat. The
+    agent itself only *warns* at startup if it is re-enabled: install-time
+    disable is a sensible default, runtime force-disable would fight a
+    deliberate user choice.
 
 ## The TCC dance
 

@@ -117,6 +117,7 @@ enum Installer {
             return 1
         }
 
+        disableCompetingXcodeTracker()
         let cliInstalled = ensureWakatimeCLI()
         checkAPIKey()
 
@@ -137,6 +138,39 @@ enum Installer {
         print("& Security → Accessibility - enable it there). Tracking begins the")
         print("moment the permission is on; no restart needed.")
         return 0
+    }
+
+    /// macos-wakatime (WakaTime.app) tracks Xcode through the same AX API;
+    /// running both double-counts every heartbeat. its monitored-app list is
+    /// a plain array in its defaults domain, so install removes Xcode from
+    /// it (other apps untouched) and bounces the app in the background - no
+    /// settings window appears.
+    private static let wakaTimeAppBundleID = "macos-wakatime.WakaTime"
+    private static let wakaTimeMonitoredKey = "wakatime_monitored_apps"
+
+    static func competingXcodeTrackerEnabled() -> Bool {
+        let domain = UserDefaults.standard.persistentDomain(forName: wakaTimeAppBundleID)
+        let monitored = domain?[wakaTimeMonitoredKey] as? [String] ?? []
+        return monitored.contains(XcodeObserver.xcodeBundleID)
+    }
+
+    private static func disableCompetingXcodeTracker() {
+        guard competingXcodeTrackerEnabled(),
+            var domain = UserDefaults.standard.persistentDomain(forName: wakaTimeAppBundleID),
+            var monitored = domain[wakaTimeMonitoredKey] as? [String]
+        else { return }
+        monitored.removeAll { $0 == XcodeObserver.xcodeBundleID }
+        domain[wakaTimeMonitoredKey] = monitored
+        UserDefaults.standard.setPersistentDomain(domain, forName: wakaTimeAppBundleID)
+        print("Disabled WakaTime.app's Xcode tracking (it would double-count every heartbeat).")
+        print("Its other monitored apps are untouched; re-enable Xcode in WakaTime.app's settings to undo.")
+        // a running WakaTime.app may cache the list; bounce it invisibly
+        // (open -g launches in the background, no windows).
+        guard let app = NSRunningApplication.runningApplications(withBundleIdentifier: wakaTimeAppBundleID).first
+        else { return }
+        app.terminate()
+        for _ in 0..<15 where !app.isTerminated { Thread.sleep(forTimeInterval: 0.2) }
+        shell("/usr/bin/open", ["-g", "-b", wakaTimeAppBundleID])
     }
 
     /// WakaTime, Inc.'s Apple Developer team, pinned so a compromised
