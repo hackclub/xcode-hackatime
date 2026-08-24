@@ -14,10 +14,15 @@ func runAgent() -> Never {
         logLine("waiting for Accessibility permission…")
         // A TCC grant does not reliably propagate to an already-running
         // process, so poll briefly and then exit - launchd's KeepAlive
-        // relaunches us and the fresh process sees the grant.
-        for _ in 0..<6 {
-            Thread.sleep(forTimeInterval: 5)
+        // relaunches us and the fresh process sees the grant. While waiting,
+        // if Xcode is open, show the onboarding window (a separate process,
+        // so it survives our relaunch cycle without flicker).
+        for _ in 0..<15 {
+            Thread.sleep(forTimeInterval: 2)
             if AXIsProcessTrusted() { break }
+            let xcodeRunning = NSWorkspace.shared.runningApplications
+                .contains { $0.bundleIdentifier == XcodeObserver.xcodeBundleID }
+            if xcodeRunning { Onboarding.spawnIfNeeded() }
         }
         if !AXIsProcessTrusted() {
             logLine("still not trusted; exiting so launchd can relaunch with fresh TCC state")
@@ -25,6 +30,8 @@ func runAgent() -> Never {
         }
     }
     logLine("Accessibility permission OK")
+    // Tells any onboarding window that tracking has started, so it dismisses.
+    FileManager.default.createFile(atPath: Onboarding.trustedMarker, contents: Data())
 
     let engine = HeartbeatEngine(log: logLine)
     if !engine.cliExists {
@@ -46,6 +53,8 @@ let command = CommandLine.arguments.count > 1 ? CommandLine.arguments[1] : "help
 switch command {
 case "run":
     runAgent()
+case "onboard":
+    exit(Onboarding.run())
 case "probe":
     exit(Probe.run())
 case "install":
