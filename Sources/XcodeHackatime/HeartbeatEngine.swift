@@ -193,10 +193,12 @@ final class HeartbeatEngine {
             }
             baseline.lineCount = count
         }
-        // parity with vscode-wakatime's paste guard: a jump of more than 50
-        // lines in one save is a paste or generation, not typing. drop the
-        // delta (the write heartbeat itself still counts).
-        if let changes = lineChanges, changes > 50 { lineChanges = nil }
+        // paste guard, symmetric: a jump of more than 50 lines in one save
+        // (either direction) is a paste, a generation or a bulk delete, not
+        // typing. drop the delta; the write heartbeat itself still counts.
+        // (proven live: an external cleanup once sailed through as -99 when
+        // only positive jumps were guarded.)
+        if let changes = lineChanges, abs(changes) > 50 { lineChanges = nil }
 
         // 5. send, then commit, only on a successful launch (FileBaseline).
         guard

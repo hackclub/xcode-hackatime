@@ -176,6 +176,18 @@ final class HeartbeatEngineTests: XCTestCase {
             "vscode-wakatime parity: >50-line jumps carry no human delta")
     }
 
+    func testLargeDeletionDeltaIsDropped() {
+        let file = makeFile("a.swift", lines: 200, mtime: clock)
+        consider(file)
+        advance(30)
+        rewrite(file, lines: 3, mtime: clock.addingTimeInterval(-1))  // bulk delete, not typing
+        consider(file)
+        XCTAssertTrue(lastSend!.contains("--write"))
+        XCTAssertNil(
+            value(of: "--human-line-changes", in: lastSend!),
+            "the paste guard is symmetric: -197 is no more typed than +197")
+    }
+
     // MARK: - Commit-on-success
 
     func testFailedLaunchRetriesTheSameWrite() {
