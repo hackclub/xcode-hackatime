@@ -9,10 +9,21 @@ jobs:
     runs-on: macos-latest
     permissions:
       contents: write
+    # While signing secrets are unset, releases are built and published
+    # locally with scripts/release.sh; the whole job no-ops so it can't
+    # clobber a manually uploaded (signed) asset with an unsigned one.
+    env:
+      HAVE_CERT: ${{ secrets.CSC_LINK != '' }}
     steps:
+      - name: Check signing secrets
+        if: env.HAVE_CERT != 'true'
+        run: echo "::warning::CSC_LINK not configured - skipping CI release (publish with scripts/release.sh)"
+
       - uses: actions/checkout@v4
+        if: env.HAVE_CERT == 'true'
 
       - name: Import signing certificate
+        if: env.HAVE_CERT == 'true'
         env:
           APPLE_CERTIFICATE: ${{ secrets.CSC_LINK }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
@@ -30,9 +41,11 @@ jobs:
           rm cert.p12
 
       - name: Build universal binary
+        if: env.HAVE_CERT == 'true'
         run: swift build -c release --arch arm64 --arch x86_64
 
       - name: Sign
+        if: env.HAVE_CERT == 'true'
         env:
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
         run: |
@@ -44,6 +57,7 @@ jobs:
           codesign -dv "$BIN" 2>&1 | grep -E "Authority|TeamIdentifier"
 
       - name: Package and notarize
+        if: env.HAVE_CERT == 'true'
         env:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
@@ -65,6 +79,7 @@ jobs:
           echo "ZIP=$ZIP" >> "$GITHUB_ENV"
 
       - name: Upload release asset
+        if: env.HAVE_CERT == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
