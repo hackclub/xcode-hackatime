@@ -4,7 +4,9 @@ import XCTest
 
 /// the preferences watcher must survive cfprefsd-style atomic replaces
 /// (write to a temp file, rename over the target): a naive per-fd watch
-/// dies with the replaced inode.
+/// dies with the replaced inode. the assertion is precise: a write to the
+/// REPLACEMENT file must be observed, which only a reattached watcher can
+/// do (the attach-time courtesy fire cannot satisfy it).
 final class FileWatcherTests: XCTestCase {
     func testWatcherSurvivesAtomicReplace() {
         let dir = FileManager.default.temporaryDirectory
@@ -14,28 +16,28 @@ final class FileWatcherTests: XCTestCase {
         let target = dir.appendingPathComponent("prefs.plist").path
         FileManager.default.createFile(atPath: target, contents: Data("a".utf8))
 
-        let changed = expectation(description: "changes observed across a replace")
-        changed.expectedFulfillmentCount = 2
-        changed.assertForOverFulfill = false
-        Installer.watchFile(target) { changed.fulfill() }
-
-        // in-place append (plain write event)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-            let handle = FileHandle(forWritingAtPath: target)!
-            handle.seekToEndOfFile()
-            handle.write(Data("b".utf8))
-            try? handle.close()
+        var finalWriteHappened = false
+        let observedAfterReplace = expectation(description: "write to the replacement file observed")
+        observedAfterReplace.assertForOverFulfill = false
+        Installer.watchFile(target) {
+            if finalWriteHappened { observedAfterReplace.fulfill() }
         }
-        // atomic replace, then a write to the REPLACEMENT file: only a
-        // reattached watcher can see it.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+
+        // atomic replace, cfprefsd style.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
             let tmp = dir.appendingPathComponent("tmp").path
-            FileManager.default.createFile(atPath: tmp, contents: Data("c".utf8))
+            FileManager.default.createFile(atPath: tmp, contents: Data("b".utf8))
             _ = rename(tmp, target)
         }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 3.5) {
-            try? Data("d".utf8).write(to: URL(fileURLWithPath: target))
+        // give the watcher past its 1s reattach delay, then write to the
+        // replacement file.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
+            finalWriteHappened = true
+            let handle = FileHandle(forWritingAtPath: target)!
+            handle.seekToEndOfFile()
+            handle.write(Data("c".utf8))
+            try? handle.close()
         }
-        wait(for: [changed], timeout: 10)
+        wait(for: [observedAfterReplace], timeout: 10)
     }
 }

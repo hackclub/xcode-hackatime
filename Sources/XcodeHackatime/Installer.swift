@@ -179,6 +179,10 @@ enum Installer {
         }
         watchers.append(source)
         source.resume()
+        // fire once per attach: a change can land inside the reattach gap
+        // after an atomic replace, and the watcher is the sole owner of its
+        // state (no polling fallback), so every attach re-checks.
+        onChange()
     }
 
     /// event-driven guard for decision 14: watch WakaTime.app's preferences

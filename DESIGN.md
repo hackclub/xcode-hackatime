@@ -71,7 +71,7 @@ saves.
 | HID recency | 10s | XcodeObserver.inputRecencyWindow | Real typing produces an AX event within milliseconds of a keystroke. |
 | Prefix cap | 1M UTF-16 units | XcodeObserver.maxPrefixLength | Line/column is optional metadata; a multi-megabyte AX prefix fetch stalls Xcode's main thread. |
 | Paste guard | \|delta\| > 50 lines | HeartbeatEngine (phase 4) | a >50-line jump in either direction in one save is a paste, generation or bulk delete, not typing - the delta is dropped, the write still counts. (Symmetric, unlike vscode-wakatime's positive-only guard; a live -99 external cleanup proved the need.) |
-| Trust probe fallback | 10s waiting / 60s trusted | main.swift timers | Fresh-process TCC reads are primarily *event-driven* (the `com.apple.accessibility.api` distributed notification fires on any Accessibility-list change); the timers only cover missed notifications. |
+| Trust probe fallback | 10s waiting / 300s trusted | main.swift timers | Fresh-process TCC reads are primarily *event-driven* (the `com.apple.accessibility.api` distributed notification fires on any Accessibility-list change); the timers only cover missed notifications, and the trusted-side fallback shares the 5-minute maintenance tick with log trimming. |
 
 ## Accepted decisions
 
@@ -115,12 +115,14 @@ saves.
     `macos-wakatime.WakaTime` defaults domain, bounce the app in the
     background). Both trackers share `~/.wakatime.cfg` and the CLI - same
     backend - so dual Xcode tracking is never a deliberate setup, always
-    double-counting. Install does it, agent startup does it, a preferences
-    file watcher re-does it the moment it reappears (surviving cfprefsd's
-    atomic replaces) and the 60s tick covers missed events. Each disable is
-    logged, and the agent posts a macOS banner (via osascript, since an
-    unbundled binary cannot use UNUserNotificationCenter) rate-limited to
-    one per 10 minutes, so the preference rewrite is never silent.
+    double-counting. Install does it, agent startup does it, and a
+    preferences file watcher owns it from then on: it re-checks the moment
+    the plist changes AND on every (re)attach, which covers cfprefsd's
+    atomic replaces and the reattach gap without any polling fallback.
+    Each disable is logged, and the agent posts a macOS banner (via
+    osascript, since an unbundled binary cannot use
+    UNUserNotificationCenter) rate-limited to one per 10 minutes, so the
+    preference rewrite is never silent.
 
 ## The TCC dance
 

@@ -150,13 +150,13 @@ func runAgent() -> Never {
     DistributedNotificationCenter.default().addObserver(
         forName: axChangedNotification, object: nil, queue: .main
     ) { _ in revocationCheck() }
-    Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { _ in
-        // a trusted agent lives for the whole login session; startup-only
-        // trimming would let the log grow without bound.
+    // slow maintenance tick. the WakaTime.app guard is fully event-driven
+    // (the preferences watcher re-checks on every attach), so this only
+    // covers what has no event source: log growth, and TCC revocation when
+    // the undocumented axChangedNotification fails to arrive. five-minute
+    // worst-case detection is acceptable for a fallback path.
+    Timer.scheduledTimer(withTimeInterval: 300, repeats: true) { _ in
         Installer.trimLogIfNeeded()
-        // fallback for the preferences watcher: re-disable WakaTime.app's
-        // Xcode tracking if it reappeared and an event was missed.
-        Installer.disableCompetingXcodeTracker(report: logLine, notifyUser: true)
         revocationCheck()
     }
 
