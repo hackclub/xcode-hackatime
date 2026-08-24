@@ -148,13 +148,18 @@ enum Installer {
     private static let wakaTimeAppBundleID = "macos-wakatime.WakaTime"
     private static let wakaTimeMonitoredKey = "wakatime_monitored_apps"
 
-    static func competingXcodeTrackerEnabled() -> Bool {
+    private static func competingXcodeTrackerEnabled() -> Bool {
         let domain = UserDefaults.standard.persistentDomain(forName: wakaTimeAppBundleID)
         let monitored = domain?[wakaTimeMonitoredKey] as? [String] ?? []
         return monitored.contains(XcodeObserver.xcodeBundleID)
     }
 
-    private static func disableCompetingXcodeTracker() {
+    /// both trackers share ~/.wakatime.cfg and the CLI, so dual Xcode
+    /// tracking is never a deliberate setup - it is always double-counting.
+    /// callers therefore re-run this whenever the list can have reappeared
+    /// (WakaTime.app reinstalls preserve preferences, but wipes and fresh
+    /// first-runs do not). it does nothing when Xcode is not in the list.
+    static func disableCompetingXcodeTracker(report: (String) -> Void = { print($0) }) {
         guard competingXcodeTrackerEnabled(),
             var domain = UserDefaults.standard.persistentDomain(forName: wakaTimeAppBundleID),
             var monitored = domain[wakaTimeMonitoredKey] as? [String]
@@ -162,8 +167,8 @@ enum Installer {
         monitored.removeAll { $0 == XcodeObserver.xcodeBundleID }
         domain[wakaTimeMonitoredKey] = monitored
         UserDefaults.standard.setPersistentDomain(domain, forName: wakaTimeAppBundleID)
-        print("Disabled WakaTime.app's Xcode tracking (it would double-count every heartbeat).")
-        print("Its other monitored apps are untouched; re-enable Xcode in WakaTime.app's settings to undo.")
+        report("Disabled WakaTime.app's Xcode tracking (it would double-count every heartbeat).")
+        report("Its other monitored apps are untouched.")
         // a running WakaTime.app may cache the list; bounce it invisibly
         // (open -g launches in the background, no windows).
         guard let app = NSRunningApplication.runningApplications(withBundleIdentifier: wakaTimeAppBundleID).first

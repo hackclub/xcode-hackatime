@@ -99,13 +99,14 @@ saves.
 13. **An unsent user write is pinned** (`FileBaseline.unsentWrite`) so that
     retries after launch failures can't drift it out of the attribution
     band into "external" while the user keeps editing.
-14. **Install auto-disables WakaTime.app's Xcode tracking** (removes
+14. **WakaTime.app's Xcode tracking is auto-disabled, persistently** (remove
     `com.apple.dt.Xcode` from `wakatime_monitored_apps` in the
-    `macos-wakatime.WakaTime` defaults domain and bounces the app in the
-    background) because running both double-counts every heartbeat. The
-    agent itself only *warns* at startup if it is re-enabled: install-time
-    disable is a sensible default, runtime force-disable would fight a
-    deliberate user choice.
+    `macos-wakatime.WakaTime` defaults domain, bounce the app in the
+    background). Both trackers share `~/.wakatime.cfg` and the CLI - same
+    backend - so dual Xcode tracking is never a deliberate setup, always
+    double-counting. Install does it, agent startup does it, and the 60s
+    tick re-does it if it reappears (app reinstalls preserve preferences,
+    but wipes and fresh first-runs do not). Each disable is logged.
 
 ## The TCC dance
 
