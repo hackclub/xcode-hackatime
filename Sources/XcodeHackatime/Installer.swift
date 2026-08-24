@@ -9,9 +9,16 @@ enum Installer {
     static var plistPath: String { NSHomeDirectory() + "/Library/LaunchAgents/\(label).plist" }
     static var logPath: String { installDir + "/xcode-hackatime.log" }
 
+    /// Absolute path to this executable. argv[0] is whatever was typed at
+    /// the shell — a bare name when found via $PATH — so it must never be
+    /// used as a filesystem path.
+    static var selfExecutablePath: String {
+        Bundle.main.executablePath ?? CommandLine.arguments[0]
+    }
+
     static func install() -> Int32 {
         let fm = FileManager.default
-        let selfPath = URL(fileURLWithPath: CommandLine.arguments[0]).resolvingSymlinksInPath().path
+        let selfPath = URL(fileURLWithPath: selfExecutablePath).resolvingSymlinksInPath().path
 
         do {
             try fm.createDirectory(atPath: installDir, withIntermediateDirectories: true)
@@ -102,7 +109,13 @@ enum Installer {
     private static func checkAPIKey() {
         let cfg = NSHomeDirectory() + "/.wakatime.cfg"
         let contents = (try? String(contentsOfFile: cfg, encoding: .utf8)) ?? ""
-        if !contents.contains("api_key") {
+        // An actual assignment, not just the substring — a commented-out
+        // "# api_key = ..." must not pass. (Also matches api_key_vault_cmd.)
+        let hasKey = contents.split(separator: "\n").contains { line in
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            return trimmed.hasPrefix("api_key") && trimmed.contains("=")
+        }
+        if !hasKey {
             print("")
             print("⚠️  No api_key found in ~/.wakatime.cfg.")
             print("   Hackatime: follow https://hackatime.hackclub.com - its setup script")

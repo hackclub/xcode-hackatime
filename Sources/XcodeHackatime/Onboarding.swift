@@ -48,7 +48,7 @@ enum Onboarding {
         let process = Process()
         // Spawn our own binary, not the installed copy — they differ when
         // running from a build directory during development.
-        process.executableURL = URL(fileURLWithPath: CommandLine.arguments[0])
+        process.executableURL = URL(fileURLWithPath: Installer.selfExecutablePath)
         process.arguments = ["onboard"]
         try? process.run()
     }
@@ -73,8 +73,10 @@ enum Onboarding {
         window.makeKeyAndOrderFront(nil)
         app.activate(ignoringOtherApps: true)
 
-        // Dismiss when tracking starts (agent touches the marker) or the
-        // user closes the window.
+        // Dismiss when tracking starts (agent touches the marker), when the
+        // user closes the window, or when Xcode quits (the window only makes
+        // sense alongside a running Xcode; not a user dismissal, so it comes
+        // back on the next Xcode launch).
         Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { _ in
             if let attrs = try? FileManager.default.attributesOfItem(atPath: trustedMarker),
                let mtime = attrs[.modificationDate] as? Date,
@@ -83,6 +85,11 @@ enum Onboarding {
             }
             if !window.isVisible {
                 finish(dismissedByUser: true)
+            }
+            let xcodeRunning = NSWorkspace.shared.runningApplications
+                .contains { $0.bundleIdentifier == XcodeObserver.xcodeBundleID }
+            if !xcodeRunning {
+                finish(dismissedByUser: false)
             }
         }
 

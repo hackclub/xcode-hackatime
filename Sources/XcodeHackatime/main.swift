@@ -8,18 +8,33 @@ func logLine(_ message: String) {
 }
 
 /// TCC state read by a brand-new process — immune to the per-process cache.
-func freshTrustCheck() -> Bool {
+/// nil means the check itself couldn't run (e.g. our binary briefly missing
+/// during a reinstall, transient fork pressure) — callers must not confuse
+/// that with a definitive "not trusted".
+func freshTrustCheck() -> Bool? {
     let process = Process()
-    process.executableURL = URL(fileURLWithPath: CommandLine.arguments[0])
+    process.executableURL = URL(fileURLWithPath: Installer.selfExecutablePath)
     process.arguments = ["check-trust"]
     process.standardOutput = FileHandle.nullDevice
     process.standardError = FileHandle.nullDevice
-    guard (try? process.run()) != nil else { return false }
+    guard (try? process.run()) != nil else { return nil }
     process.waitUntilExit()
     return process.terminationStatus == 0
 }
 
+/// launchd never rotates StandardOutPath, so bound it ourselves: start each
+/// agent run with a fresh file once it grows past ~1MB. Non-atomic write on
+/// purpose — it truncates the inode launchd already has open (O_APPEND), so
+/// both our stdout and future relaunches keep working.
+func trimLogIfNeeded() {
+    guard let attrs = try? FileManager.default.attributesOfItem(atPath: Installer.logPath),
+          let size = (attrs[.size] as? NSNumber)?.intValue, size > 1_000_000 else { return }
+    try? "".write(toFile: Installer.logPath, atomically: false, encoding: .utf8)
+    logLine("log trimmed (was \(size) bytes)")
+}
+
 func runAgent() -> Never {
+    trimLogIfNeeded()
     if !AXIsProcessTrusted() {
         // Show the system permission prompt only once per install: it's the
         // only way to get registered in the Accessibility list at all, but we
@@ -45,7 +60,7 @@ func runAgent() -> Never {
         // cycle without flicker).
         for _ in 0..<60 {
             Thread.sleep(forTimeInterval: 1)
-            if freshTrustCheck() {
+            if freshTrustCheck() == true {
                 logLine("permission granted; relaunching to pick it up")
                 exit(0)
             }
@@ -78,15 +93,27 @@ func runAgent() -> Never {
     observer.startWatchingWorkspace()
 
     // Notice revocation: our own AX state is cached, so ask a fresh process.
+    // Off the main queue — waitUntilExit would otherwise stall AX event
+    // delivery for the child's whole lifetime on every check. Only a
+    // definitive "not trusted" restarts; a failed check (nil) is retried.
     Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { _ in
-        if !freshTrustCheck() {
-            logLine("Accessibility permission revoked; restarting into onboarding")
-            exit(0)
+        DispatchQueue.global(qos: .utility).async {
+            guard freshTrustCheck() == false else { return }
+            DispatchQueue.main.async {
+                logLine("Accessibility permission revoked; restarting into onboarding")
+                exit(0)
+            }
         }
     }
 
     logLine("xcode-hackatime \(appVersion) running")
-    RunLoop.main.run()
+    // Nothing else holds engine/observer strongly (the AX callback refcon is
+    // deliberately unretained, timers capture weak), and ARC frees locals at
+    // last use, not scope end — without this, an optimized build may dealloc
+    // both right here, leaving the AX callback with a dangling refcon.
+    withExtendedLifetime((engine, observer)) {
+        RunLoop.main.run()
+    }
     exit(0)
 }
 

@@ -50,10 +50,28 @@ final class XcodeObserver {
         attachIfRunning()
 
         // Safety net: AX registrations can be missed around app relaunches or
-        // window churn; re-sync focus periodically.
+        // window churn; re-sync focus periodically. Synthetic: re-syncing must
+        // never count as user activity, or an idle Xcode would keep producing
+        // heartbeats forever.
         Timer.scheduledTimer(withTimeInterval: 20, repeats: true) { [weak self] _ in
             guard let self else { return }
-            if self.observer == nil { self.attachIfRunning() } else { self.refocus() }
+            // Ground truth beats notifications: if the pid we attached to is
+            // dead or recycled (a missed didTerminate would otherwise wedge
+            // us forever, since attachIfRunning bails while observer != nil),
+            // detach so the normal re-attach path runs against a live Xcode.
+            // Check the attached pid itself — never "the first running
+            // Xcode": Xcode and Xcode-beta share a bundle ID, and comparing
+            // against an unstable enumeration order would thrash a healthy
+            // attachment every 20s whenever both are running.
+            if self.observer != nil {
+                let attached = NSRunningApplication(processIdentifier: self.pid)
+                if attached == nil || attached?.isTerminated == true
+                    || attached?.bundleIdentifier != Self.xcodeBundleID {
+                    self.log("attached Xcode pid \(self.pid) is gone; detaching")
+                    self.detach()
+                }
+            }
+            if self.observer == nil { self.attachIfRunning() } else { self.refocus(synthetic: true) }
         }
     }
 
@@ -82,11 +100,22 @@ final class XcodeObserver {
         let refcon = Unmanaged.passUnretained(self).toOpaque()
         for note in [kAXFocusedUIElementChangedNotification, kAXFocusedWindowChangedNotification,
                      kAXMainWindowChangedNotification, kAXWindowCreatedNotification] {
-            AXObserverAddNotification(obs, app, note as CFString, refcon)
+            let err = AXObserverAddNotification(obs, app, note as CFString, refcon)
+            guard err == .success || err == .notificationAlreadyRegistered else {
+                // Xcode's AX server may not be ready yet (racing a slow
+                // launch). A partial attach would look healthy but never
+                // deliver focus events; drop everything and let the 20s
+                // re-sync timer retry from scratch.
+                log("app-level AX registration failed for pid \(pid) (\(err.rawValue)); will retry")
+                detach()
+                return
+            }
         }
         CFRunLoopAddSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(obs), .commonModes)
         log("attached to Xcode pid \(pid)")
-        refocus()
+        // Synthetic: merely attaching (agent start, Xcode launch) is not
+        // coding activity; the first real keystroke/cursor event reports it.
+        refocus(synthetic: true)
     }
 
     private func detach() {
@@ -109,20 +138,25 @@ final class XcodeObserver {
              kAXWindowCreatedNotification:
             refocus()
         case kAXSelectedTextChangedNotification:
-            updateCursor(from: element)
-            touch()
+            // Report activity only when the state refresh actually ran, so a
+            // heartbeat can never fire with state older than its trigger
+            // (matters after an in-pane file swap, which emits no focus
+            // notification). The refresh throttle (1s) is no coarser than
+            // the engine's own send spacing, so nothing real is lost.
+            if updateCursor(from: element) { touch() }
         case kAXValueChangedNotification:
             // The buffer content changed (typing, paste, refactor, …).
-            updateCursor(from: element)
-            touch()
+            if updateCursor(from: element) { touch() }
         default:
             break
         }
     }
 
     /// Re-resolve which editor is focused and (re)subscribe to its
-    /// per-element notifications.
-    private func refocus() {
+    /// per-element notifications. `synthetic` marks calls that originate from
+    /// timers/attachment rather than a user-driven AX notification: they keep
+    /// state and subscriptions fresh but never report activity downstream.
+    private func refocus(synthetic: Bool = false) {
         guard let app = appElement, let obs = observer else { return }
         guard let focused = AX.element(app, kAXFocusedUIElementAttribute as String) else { return }
 
@@ -133,6 +167,7 @@ final class XcodeObserver {
         }
 
         let refcon = Unmanaged.passUnretained(self).toOpaque()
+        var editorChanged = false
         if let previous = trackedEditor, CFEqual(previous, focused) == false {
             AXObserverRemoveNotification(obs, previous, kAXSelectedTextChangedNotification as CFString)
             AXObserverRemoveNotification(obs, previous, kAXValueChangedNotification as CFString)
@@ -144,6 +179,7 @@ final class XcodeObserver {
             let ok: (AXError) -> Bool = { $0 == .success || $0 == .notificationAlreadyRegistered }
             if ok(selErr), ok(valErr) {
                 trackedEditor = focused
+                editorChanged = true
             } else {
                 // Element mid-teardown; drop any partial registration and let
                 // the next focus event or the 20s re-sync retry.
@@ -153,9 +189,20 @@ final class XcodeObserver {
             }
         }
 
-        lastExpensiveUpdate = .distantPast // focus changed: refresh path/line now
-        updateCursor(from: focused)
-        touch()
+        // Expensive reads (document prefix, parent walk) only when something
+        // actually changed. A synthetic re-sync with the same editor still
+        // focused would otherwise fetch the whole pre-caret text every 20s
+        // while Xcode sits idle — each AX read blocks Xcode's main thread.
+        var refreshed = false
+        if !synthetic || editorChanged {
+            lastExpensiveUpdate = .distantPast // focus changed: refresh path/line now
+            refreshed = updateCursor(from: focused)
+        }
+        // Same invariant as handle(): never report activity on stale state.
+        // If the refresh transiently failed, state may still describe the
+        // previously focused file, and a heartbeat would misattribute this
+        // activity to it.
+        if !synthetic, refreshed { touch() }
     }
 
     /// Xcode's source editor is an AXTextArea whose AXDescription is
@@ -171,11 +218,14 @@ final class XcodeObserver {
 
     // MARK: - State extraction
 
-    private func updateFilePath(editor: AXUIElement) {
+    /// Returns false when the containing window couldn't be resolved (a
+    /// transient AX failure) — state is left untouched so the caller can
+    /// treat the whole refresh as not having happened.
+    private func updateFilePath(editor: AXUIElement) -> Bool {
         // The window's AXDocument carries the focused editor's file, as a
         // file:// URL string. This is the same source the official
         // macos-wakatime app uses for Xcode.
-        guard let window = AX.window(containing: editor) else { return }
+        guard let window = AX.window(containing: editor) else { return false }
         let resolved: String?
         if let doc = AX.string(window, kAXDocumentAttribute as String) {
             let path: String
@@ -194,6 +244,7 @@ final class XcodeObserver {
             log("file: \(resolved ?? "<none>")")
         }
         state.filePath = resolved
+        return true
     }
 
     /// Minimum spacing between the expensive AX reads (the document-prefix
@@ -204,16 +255,25 @@ final class XcodeObserver {
     private static let expensiveRefreshInterval: TimeInterval = 1
     private var lastExpensiveUpdate: Date = .distantPast
 
-    private func updateCursor(from editor: AXUIElement) {
-        guard let sel = AX.range(editor, kAXSelectedTextRangeAttribute as String) else { return }
-        state.cursorOffset = sel.location
+    /// Returns true only when the state refresh actually ran (throttled
+    /// otherwise), so callers can avoid reporting activity on stale state.
+    @discardableResult
+    private func updateCursor(from editor: AXUIElement) -> Bool {
+        guard let sel = AX.range(editor, kAXSelectedTextRangeAttribute as String) else { return false }
         let now = Date()
-        guard now.timeIntervalSince(lastExpensiveUpdate) >= Self.expensiveRefreshInterval else { return }
+        guard now.timeIntervalSince(lastExpensiveUpdate) >= Self.expensiveRefreshInterval else { return false }
         lastExpensiveUpdate = now
+        // Refresh path, line, and offset together (or not at all), so a
+        // heartbeat can never pair the previous file's path with the new
+        // file's cursor when Xcode swaps the file shown in the same editor
+        // pane (e.g. ⌃⌘←) — that swap emits no focus notification. Resolve
+        // the path FIRST: if the window walk transiently fails, commit
+        // nothing and report no refresh, rather than pairing the old file
+        // with a new cursor.
+        guard updateFilePath(editor: editor) else { return false }
+        state.cursorOffset = sel.location
         state.line = lineNumber(in: editor, forOffset: sel.location)
-        // The window's document can change without a focus notification when
-        // Xcode swaps the file shown in the same editor pane (e.g. ⌃⌘←).
-        updateFilePath(editor: editor)
+        return true
     }
 
     /// Physical (newline-delimited) 1-based line number for a character
