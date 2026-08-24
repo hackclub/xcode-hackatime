@@ -20,9 +20,20 @@ func freshTrustCheck() -> Bool {
 }
 
 func runAgent() -> Never {
-    // Ask for Accessibility permission (shows the system prompt on first run).
-    let options = ["AXTrustedCheckOptionPrompt": true] as CFDictionary
-    if !AXIsProcessTrustedWithOptions(options) {
+    if !AXIsProcessTrusted() {
+        // Show the system permission prompt only once per install: it's the
+        // only way to get registered in the Accessibility list at all, but we
+        // exit/relaunch continuously while waiting (to read fresh TCC state),
+        // and re-prompting on every relaunch nags the user with popups. After
+        // the first prompt the row exists in System Settings, and the
+        // onboarding window carries the instructions.
+        let promptMarker = Installer.installDir + "/.ax-prompted"
+        if !FileManager.default.fileExists(atPath: promptMarker) {
+            try? FileManager.default.createDirectory(atPath: Installer.installDir, withIntermediateDirectories: true)
+            FileManager.default.createFile(atPath: promptMarker, contents: Data())
+            let options = ["AXTrustedCheckOptionPrompt": true] as CFDictionary
+            _ = AXIsProcessTrustedWithOptions(options)
+        }
         logLine("waiting for Accessibility permission…")
         // A TCC grant does not propagate to an already-running process (the
         // AX framework caches the denial), but a *fresh* process always reads
@@ -47,7 +58,13 @@ func runAgent() -> Never {
     }
     logLine("Accessibility permission OK")
     // Tells any onboarding window that tracking has started, so it dismisses.
+    // (Ensure the directory exists — when running from a build directory the
+    // install step may never have created it.)
+    try? FileManager.default.createDirectory(atPath: Installer.installDir, withIntermediateDirectories: true)
     FileManager.default.createFile(atPath: Onboarding.trustedMarker, contents: Data())
+    // A past "user closed the onboarding window" no longer applies once
+    // trusted; clear it so onboarding returns if permission is ever revoked.
+    try? FileManager.default.removeItem(atPath: Onboarding.dismissedMarker)
 
     let engine = HeartbeatEngine(log: logLine)
     if !engine.cliExists {
@@ -103,6 +120,7 @@ default:
       status      show agent state and recent log lines
       run         run the tracker in the foreground (used by launchd)
       probe       dump Xcode's Accessibility tree state (diagnostics)
+      version     print the version
     """)
     exit(command == "help" ? 0 : 64)
 }

@@ -115,15 +115,24 @@ enum Installer {
 
     static func uninstall() -> Int32 {
         _ = shell("/bin/launchctl", ["bootout", "gui/\(getuid())/\(label)"])
-        try? FileManager.default.removeItem(atPath: plistPath)
-        try? FileManager.default.removeItem(atPath: installedBinary)
+        let fm = FileManager.default
+        try? fm.removeItem(atPath: plistPath)
+        try? fm.removeItem(atPath: installedBinary)
+        // Our state files. wakatime-cli and ~/.wakatime.cfg stay — they're
+        // shared with every other WakaTime plugin.
+        try? fm.removeItem(atPath: logPath)
+        try? fm.removeItem(atPath: Onboarding.trustedMarker)
+        try? fm.removeItem(atPath: Onboarding.dismissedMarker)
+        try? fm.removeItem(atPath: Onboarding.pidFile)
+        try? fm.removeItem(atPath: installDir + "/.ax-prompted")
         print("Uninstalled. You can also remove the Accessibility entry in System Settings.")
         return 0
     }
 
     static func status() -> Int32 {
         let (status, out) = shell("/bin/launchctl", ["print", "gui/\(getuid())/\(label)"])
-        if status == 0 {
+        let loaded = status == 0
+        if loaded {
             let state = out.split(separator: "\n").first { $0.contains("state =") }?.trimmingCharacters(in: .whitespaces) ?? "state unknown"
             print("launchd agent: loaded (\(state))")
         } else {
@@ -134,7 +143,7 @@ enum Installer {
             print("--- last log lines ---")
             tail.forEach { print($0) }
         }
-        return 0
+        return loaded ? 0 : 1
     }
 
     @discardableResult

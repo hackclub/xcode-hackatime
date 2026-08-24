@@ -136,29 +136,37 @@ final class XcodeObserver {
         if let previous = trackedEditor, CFEqual(previous, focused) == false {
             AXObserverRemoveNotification(obs, previous, kAXSelectedTextChangedNotification as CFString)
             AXObserverRemoveNotification(obs, previous, kAXValueChangedNotification as CFString)
+            trackedEditor = nil
         }
-        if trackedEditor == nil || CFEqual(trackedEditor!, focused) == false {
-            AXObserverAddNotification(obs, focused, kAXSelectedTextChangedNotification as CFString, refcon)
-            AXObserverAddNotification(obs, focused, kAXValueChangedNotification as CFString, refcon)
-            trackedEditor = focused
+        if trackedEditor == nil {
+            let selErr = AXObserverAddNotification(obs, focused, kAXSelectedTextChangedNotification as CFString, refcon)
+            let valErr = AXObserverAddNotification(obs, focused, kAXValueChangedNotification as CFString, refcon)
+            let ok: (AXError) -> Bool = { $0 == .success || $0 == .notificationAlreadyRegistered }
+            if ok(selErr), ok(valErr) {
+                trackedEditor = focused
+            } else {
+                // Element mid-teardown; drop any partial registration and let
+                // the next focus event or the 20s re-sync retry.
+                AXObserverRemoveNotification(obs, focused, kAXSelectedTextChangedNotification as CFString)
+                AXObserverRemoveNotification(obs, focused, kAXValueChangedNotification as CFString)
+                return
+            }
         }
 
-        updateFilePath(editor: focused)
+        lastExpensiveUpdate = .distantPast // focus changed: refresh path/line now
         updateCursor(from: focused)
         touch()
     }
 
     /// Xcode's source editor is an AXTextArea whose AXDescription is
-    /// "Source Editor". Match generously but require an editable text range
-    /// so we never track the filter fields or console.
+    /// "Source Editor". Require both that description and an editable text
+    /// range, so we never track filter fields, the console, or description-
+    /// less text areas like the commit-message editor.
     private func isSourceEditor(_ element: AXUIElement) -> Bool {
         guard AX.string(element, kAXRoleAttribute as String) == (kAXTextAreaRole as String) else { return false }
         guard AX.range(element, kAXSelectedTextRangeAttribute as String) != nil else { return false }
-        if let desc = AX.string(element, kAXDescriptionAttribute as String), !desc.isEmpty {
-            return desc.localizedCaseInsensitiveContains("source editor")
-        }
-        // Description missing: accept only if it's a large text area (heuristic).
-        return true
+        guard let desc = AX.string(element, kAXDescriptionAttribute as String) else { return false }
+        return desc.localizedCaseInsensitiveContains("source editor")
     }
 
     // MARK: - State extraction
@@ -167,24 +175,41 @@ final class XcodeObserver {
         // The window's AXDocument carries the focused editor's file, as a
         // file:// URL string. This is the same source the official
         // macos-wakatime app uses for Xcode.
-        guard let window = AX.window(containing: editor),
-              let doc = AX.string(window, kAXDocumentAttribute as String) else { return }
-        let path: String
-        if doc.hasPrefix("file://"), let url = URL(string: doc) {
-            path = url.path
+        guard let window = AX.window(containing: editor) else { return }
+        let resolved: String?
+        if let doc = AX.string(window, kAXDocumentAttribute as String) {
+            let path: String
+            if doc.hasPrefix("file://"), let url = URL(string: doc) {
+                path = url.path
+            } else {
+                path = doc
+            }
+            resolved = path.hasPrefix("/") ? path : nil
         } else {
-            path = doc
+            // No document (unsaved file, playground page, …): clear rather
+            // than keep attributing activity to the previously focused file.
+            resolved = nil
         }
-        guard path.hasPrefix("/") else { return }
-        if state.filePath != path {
-            log("file: \(path)")
+        if state.filePath != resolved {
+            log("file: \(resolved ?? "<none>")")
         }
-        state.filePath = path
+        state.filePath = resolved
     }
+
+    /// Minimum spacing between the expensive AX reads (the document-prefix
+    /// fetch for the line number and the parent walk for the file path).
+    /// Every AX read blocks Xcode's main thread while it's serviced, and
+    /// heartbeats are throttled harder than this anyway — so per-keystroke
+    /// freshness buys nothing.
+    private static let expensiveRefreshInterval: TimeInterval = 1
+    private var lastExpensiveUpdate: Date = .distantPast
 
     private func updateCursor(from editor: AXUIElement) {
         guard let sel = AX.range(editor, kAXSelectedTextRangeAttribute as String) else { return }
         state.cursorOffset = sel.location
+        let now = Date()
+        guard now.timeIntervalSince(lastExpensiveUpdate) >= Self.expensiveRefreshInterval else { return }
+        lastExpensiveUpdate = now
         state.line = lineNumber(in: editor, forOffset: sel.location)
         // The window's document can change without a focus notification when
         // Xcode swaps the file shown in the same editor pane (e.g. ⌃⌘←).

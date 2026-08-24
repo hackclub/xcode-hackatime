@@ -33,9 +33,16 @@ final class HeartbeatEngine {
 
     var cliExists: Bool { FileManager.default.isExecutableFile(atPath: cliPath) }
 
+    /// Per-file baselines live for the agent's whole login session; reset
+    /// them on the rare traversal of this many distinct files rather than
+    /// growing without bound (a reset just re-establishes baselines).
+    private static let maxTrackedFiles = 512
+
     /// Snapshot the sensor state and send a heartbeat if policy says so.
     func consider(_ state: EditorState) {
         guard let file = state.filePath else { return }
+        if lastMTime.count > Self.maxTrackedFiles { lastMTime.removeAll() }
+        if lastLineCount.count > Self.maxTrackedFiles { lastLineCount.removeAll() }
         let now = Date()
         guard now.timeIntervalSince(lastAttempt) >= Self.minSpacing else { return }
         lastAttempt = now
@@ -108,9 +115,10 @@ final class HeartbeatEngine {
     }
 
     private static func installedXcodeVersion() -> String? {
-        let plist = "/Applications/Xcode.app/Contents/Info.plist"
-        guard let dict = NSDictionary(contentsOfFile: plist) else { return nil }
-        return dict["CFBundleShortVersionString"] as? String
+        // Resolve via Launch Services rather than a hardcoded path, so
+        // Xcode-beta.app and relocated installs report correctly.
+        guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: XcodeObserver.xcodeBundleID) else { return nil }
+        return Bundle(url: url)?.infoDictionary?["CFBundleShortVersionString"] as? String
     }
 }
 

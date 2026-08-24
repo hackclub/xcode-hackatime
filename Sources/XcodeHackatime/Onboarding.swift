@@ -7,29 +7,62 @@ import AppKit
 ///
 /// The window dismisses itself when the agent's trusted marker file is
 /// touched (i.e. tracking actually started), or when the user closes it.
+/// A user close is remembered for the rest of the current Xcode run, so the
+/// agent's respawn loop doesn't put the window straight back.
 enum Onboarding {
     static var pidFile: String { Installer.installDir + "/xcode-hackatime-onboard.pid" }
     /// Touched by the agent every time it starts up trusted.
     static var trustedMarker: String { Installer.installDir + "/.ax-trusted" }
+    /// Touched when the user closes the window without granting permission.
+    static var dismissedMarker: String { Installer.installDir + "/.onboarding-dismissed" }
 
-    /// True if an onboarding window process is already alive.
+    /// True if an onboarding window process is already alive. The onboard
+    /// process holds an exclusive flock on the pid file for its lifetime, and
+    /// the kernel drops the lock the moment it dies — so unlike a pid check,
+    /// this can't be fooled by a stale file or a recycled pid.
     static func isRunning() -> Bool {
-        guard let text = try? String(contentsOfFile: pidFile, encoding: .utf8),
-              let pid = pid_t(text.trimmingCharacters(in: .whitespacesAndNewlines)) else { return false }
-        return kill(pid, 0) == 0
+        let fd = open(pidFile, O_RDONLY)
+        guard fd >= 0 else { return false }
+        defer { close(fd) }
+        if flock(fd, LOCK_SH | LOCK_NB) == 0 {
+            flock(fd, LOCK_UN)
+            return false
+        }
+        return errno == EWOULDBLOCK
+    }
+
+    /// True if the user closed the window during the current Xcode run.
+    /// A dismissal from a previous Xcode run doesn't count, so quitting and
+    /// reopening Xcode shows the window again.
+    private static func dismissedThisXcodeSession() -> Bool {
+        guard let attrs = try? FileManager.default.attributesOfItem(atPath: dismissedMarker),
+              let dismissedAt = attrs[.modificationDate] as? Date else { return false }
+        guard let xcodeLaunch = NSWorkspace.shared.runningApplications
+            .first(where: { $0.bundleIdentifier == XcodeObserver.xcodeBundleID })?.launchDate
+        else { return true }
+        return dismissedAt > xcodeLaunch
     }
 
     static func spawnIfNeeded() {
-        guard !isRunning() else { return }
+        guard !isRunning(), !dismissedThisXcodeSession() else { return }
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: Installer.installedBinary)
+        // Spawn our own binary, not the installed copy — they differ when
+        // running from a build directory during development.
+        process.executableURL = URL(fileURLWithPath: CommandLine.arguments[0])
         process.arguments = ["onboard"]
         try? process.run()
     }
 
     static func run() -> Int32 {
-        try? String(ProcessInfo.processInfo.processIdentifier).write(
-            toFile: pidFile, atomically: true, encoding: .utf8)
+        try? FileManager.default.createDirectory(atPath: Installer.installDir, withIntermediateDirectories: true)
+        // Hold an exclusive lock on the pid file for our whole lifetime (the
+        // fd is deliberately never closed); see isRunning().
+        let fd = open(pidFile, O_WRONLY | O_CREAT, 0o644)
+        guard fd >= 0, flock(fd, LOCK_EX | LOCK_NB) == 0 else {
+            return 0 // another onboarding window is already up
+        }
+        ftruncate(fd, 0)
+        "\(ProcessInfo.processInfo.processIdentifier)\n".withCString { _ = write(fd, $0, strlen($0)) }
         let launchedAt = Date()
 
         let app = NSApplication.shared
@@ -46,16 +79,25 @@ enum Onboarding {
             if let attrs = try? FileManager.default.attributesOfItem(atPath: trustedMarker),
                let mtime = attrs[.modificationDate] as? Date,
                mtime > launchedAt {
-                app.terminate(nil)
+                finish(dismissedByUser: false)
             }
             if !window.isVisible {
-                app.terminate(nil)
+                finish(dismissedByUser: true)
             }
         }
 
         app.run()
-        try? FileManager.default.removeItem(atPath: pidFile)
         return 0
+    }
+
+    /// NSApplication.terminate never returns, so cleanup can't live after
+    /// app.run(); do it here and exit directly instead.
+    private static func finish(dismissedByUser: Bool) -> Never {
+        if dismissedByUser {
+            FileManager.default.createFile(atPath: dismissedMarker, contents: Data())
+        }
+        try? FileManager.default.removeItem(atPath: pidFile)
+        exit(0)
     }
 
     // MARK: - UI
