@@ -114,4 +114,4 @@ final class HeartbeatEngine {
     }
 }
 
-let appVersion = "0.2.1"
+let appVersion = "0.2.2"

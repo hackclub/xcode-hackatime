@@ -7,27 +7,43 @@ func logLine(_ message: String) {
     fflush(stdout)
 }
 
+/// TCC state read by a brand-new process — immune to the per-process cache.
+func freshTrustCheck() -> Bool {
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: CommandLine.arguments[0])
+    process.arguments = ["check-trust"]
+    process.standardOutput = FileHandle.nullDevice
+    process.standardError = FileHandle.nullDevice
+    guard (try? process.run()) != nil else { return false }
+    process.waitUntilExit()
+    return process.terminationStatus == 0
+}
+
 func runAgent() -> Never {
     // Ask for Accessibility permission (shows the system prompt on first run).
     let options = ["AXTrustedCheckOptionPrompt": true] as CFDictionary
     if !AXIsProcessTrustedWithOptions(options) {
         logLine("waiting for Accessibility permission…")
-        // A TCC grant does not reliably propagate to an already-running
-        // process, so poll briefly and then exit - launchd's KeepAlive
-        // relaunches us and the fresh process sees the grant. While waiting,
-        // if Xcode is open, show the onboarding window (a separate process,
-        // so it survives our relaunch cycle without flicker).
-        for _ in 0..<15 {
-            Thread.sleep(forTimeInterval: 2)
-            if AXIsProcessTrusted() { break }
+        // A TCC grant does not propagate to an already-running process (the
+        // AX framework caches the denial), but a *fresh* process always reads
+        // fresh TCC state. So poll by spawning ourselves as a short-lived
+        // `check-trust` child every second; the moment it reports trusted,
+        // exit so launchd relaunches us trusted (no respawn throttle once
+        // we've been alive >10s). While waiting, if Xcode is open, show the
+        // onboarding window (a separate process, so it survives our relaunch
+        // cycle without flicker).
+        for _ in 0..<60 {
+            Thread.sleep(forTimeInterval: 1)
+            if freshTrustCheck() {
+                logLine("permission granted; relaunching to pick it up")
+                exit(0)
+            }
             let xcodeRunning = NSWorkspace.shared.runningApplications
                 .contains { $0.bundleIdentifier == XcodeObserver.xcodeBundleID }
             if xcodeRunning { Onboarding.spawnIfNeeded() }
         }
-        if !AXIsProcessTrusted() {
-            logLine("still not trusted; exiting so launchd can relaunch with fresh TCC state")
-            exit(0)
-        }
+        logLine("still not trusted; exiting so launchd can relaunch with fresh TCC state")
+        exit(0)
     }
     logLine("Accessibility permission OK")
     // Tells any onboarding window that tracking has started, so it dismisses.
@@ -44,6 +60,14 @@ func runAgent() -> Never {
     }
     observer.startWatchingWorkspace()
 
+    // Notice revocation: our own AX state is cached, so ask a fresh process.
+    Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { _ in
+        if !freshTrustCheck() {
+            logLine("Accessibility permission revoked; restarting into onboarding")
+            exit(0)
+        }
+    }
+
     logLine("xcode-hackatime \(appVersion) running")
     RunLoop.main.run()
     exit(0)
@@ -53,6 +77,8 @@ let command = CommandLine.arguments.count > 1 ? CommandLine.arguments[1] : "help
 switch command {
 case "run":
     runAgent()
+case "check-trust":
+    exit(AXIsProcessTrusted() ? 0 : 1)
 case "onboard":
     exit(Onboarding.run())
 case "probe":

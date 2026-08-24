@@ -42,7 +42,7 @@ enum Onboarding {
 
         // Dismiss when tracking starts (agent touches the marker) or the
         // user closes the window.
-        Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { _ in
+        Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { _ in
             if let attrs = try? FileManager.default.attributesOfItem(atPath: trustedMarker),
                let mtime = attrs[.modificationDate] as? Date,
                mtime > launchedAt {
