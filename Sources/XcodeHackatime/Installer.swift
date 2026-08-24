@@ -148,6 +148,50 @@ enum Installer {
     private static let wakaTimeAppBundleID = "macos-wakatime.WakaTime"
     private static let wakaTimeMonitoredKey = "wakatime_monitored_apps"
 
+    /// process-lifetime file watchers. dispatch sources die when released,
+    /// so every active watcher stays referenced here.
+    private static var watchers: [DispatchSourceFileSystemObject] = []
+
+    /// watch a file for changes, surviving atomic replaces. cfprefsd writes
+    /// preferences via temp-and-rename, which kills a naive per-fd watch:
+    /// on delete or rename this watcher reports the change, then reopens
+    /// the path and keeps watching the replacement.
+    static func watchFile(_ path: String, onChange: @escaping () -> Void) {
+        let fd = open(path, O_EVTONLY)
+        guard fd >= 0 else {
+            // the file does not exist yet (domain never written); retry.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 30) { watchFile(path, onChange: onChange) }
+            return
+        }
+        let source = DispatchSource.makeFileSystemObjectSource(
+            fileDescriptor: fd, eventMask: [.write, .extend, .delete, .rename], queue: .main)
+        source.setEventHandler {
+            let events = source.data
+            onChange()
+            if events.contains(.delete) || events.contains(.rename) {
+                source.cancel()
+            }
+        }
+        source.setCancelHandler {
+            close(fd)
+            watchers.removeAll { $0 === source }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1) { watchFile(path, onChange: onChange) }
+        }
+        watchers.append(source)
+        source.resume()
+    }
+
+    /// event-driven guard for decision 14: watch WakaTime.app's preferences
+    /// and re-disable its Xcode tracking the moment it reappears. the 60s
+    /// tick remains the fallback for missed events. our own rewrite also
+    /// fires the watcher once; the re-check is then a no-op.
+    static func startCompetingTrackerWatcher(report: @escaping (String) -> Void) {
+        let plist = NSHomeDirectory() + "/Library/Preferences/\(wakaTimeAppBundleID).plist"
+        watchFile(plist) {
+            disableCompetingXcodeTracker(report: report, notifyUser: true)
+        }
+    }
+
     private static func competingXcodeTrackerEnabled() -> Bool {
         let domain = UserDefaults.standard.persistentDomain(forName: wakaTimeAppBundleID)
         let monitored = domain?[wakaTimeMonitoredKey] as? [String] ?? []
@@ -159,7 +203,10 @@ enum Installer {
     /// callers therefore re-run this whenever the list can have reappeared
     /// (WakaTime.app reinstalls preserve preferences, but wipes and fresh
     /// first-runs do not). it does nothing when Xcode is not in the list.
-    static func disableCompetingXcodeTracker(report: (String) -> Void = { print($0) }) {
+    /// notifications rate-limit so a fighting writer cannot spam banners.
+    private static var lastTrackerNotification: Date = .distantPast
+
+    static func disableCompetingXcodeTracker(report: (String) -> Void = { print($0) }, notifyUser: Bool = false) {
         guard competingXcodeTrackerEnabled(),
             var domain = UserDefaults.standard.persistentDomain(forName: wakaTimeAppBundleID),
             var monitored = domain[wakaTimeMonitoredKey] as? [String]
@@ -169,6 +216,17 @@ enum Installer {
         UserDefaults.standard.setPersistentDomain(domain, forName: wakaTimeAppBundleID)
         report("Disabled WakaTime.app's Xcode tracking (it would double-count every heartbeat).")
         report("Its other monitored apps are untouched.")
+        if notifyUser, Date().timeIntervalSince(lastTrackerNotification) > 600 {
+            lastTrackerNotification = Date()
+            // UNUserNotificationCenter needs an app bundle and this agent
+            // has none; osascript posts banners from any process.
+            shell(
+                "/usr/bin/osascript",
+                [
+                    "-e",
+                    "display notification \"WakaTime.app tried to track Xcode again - disabled it to prevent double-counting.\" with title \"Hackatime\"",
+                ])
+        }
         // a running WakaTime.app may cache the list; bounce it invisibly
         // (open -g launches in the background, no windows).
         guard let app = NSRunningApplication.runningApplications(withBundleIdentifier: wakaTimeAppBundleID).first

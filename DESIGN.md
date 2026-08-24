@@ -115,9 +115,12 @@ saves.
     `macos-wakatime.WakaTime` defaults domain, bounce the app in the
     background). Both trackers share `~/.wakatime.cfg` and the CLI - same
     backend - so dual Xcode tracking is never a deliberate setup, always
-    double-counting. Install does it, agent startup does it, and the 60s
-    tick re-does it if it reappears (app reinstalls preserve preferences,
-    but wipes and fresh first-runs do not). Each disable is logged.
+    double-counting. Install does it, agent startup does it, a preferences
+    file watcher re-does it the moment it reappears (surviving cfprefsd's
+    atomic replaces) and the 60s tick covers missed events. Each disable is
+    logged, and the agent posts a macOS banner (via osascript, since an
+    unbundled binary cannot use UNUserNotificationCenter) rate-limited to
+    one per 10 minutes, so the preference rewrite is never silent.
 
 ## The TCC dance
 
