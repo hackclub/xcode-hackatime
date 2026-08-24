@@ -1,0 +1,73 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+jobs:
+  release:
+    runs-on: macos-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Import signing certificate
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.CSC_LINK }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+        run: |
+          KEYCHAIN=build.keychain
+          KEYCHAIN_PASSWORD=$(uuidgen)
+          echo "$APPLE_CERTIFICATE" | base64 -d > cert.p12
+          security create-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN
+          security default-keychain -s $KEYCHAIN
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN
+          security import cert.p12 -k $KEYCHAIN -P "$APPLE_CERTIFICATE_PASSWORD" \
+            -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: \
+            -s -k "$KEYCHAIN_PASSWORD" $KEYCHAIN
+          rm cert.p12
+
+      - name: Build universal binary
+        run: swift build -c release --arch arm64 --arch x86_64
+
+      - name: Sign
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        run: |
+          BIN=.build/apple/Products/Release/xcode-hackatime
+          codesign -f --options runtime --timestamp \
+            -s "$APPLE_SIGNING_IDENTITY" \
+            --identifier com.hackclub.hackatime.xcode-hackatime \
+            "$BIN"
+          codesign -dv "$BIN" 2>&1 | grep -E "Authority|TeamIdentifier"
+
+      - name: Package and notarize
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+        run: |
+          BIN=.build/apple/Products/Release/xcode-hackatime
+          ZIP="xcode-hackatime-darwin-universal.zip"
+          /usr/bin/ditto -c -k "$BIN" "$ZIP"
+          # Notarization requires a Developer ID signature; skip cleanly while
+          # releases are interim-signed with a development certificate.
+          if codesign -dv "$BIN" 2>&1 | grep -q "Authority=Developer ID Application"; then
+            xcrun notarytool submit "$ZIP" --wait \
+              --apple-id "$APPLE_ID" \
+              --team-id "$APPLE_TEAM_ID" \
+              --password "$APPLE_PASSWORD"
+          else
+            echo "::warning::Not Developer ID signed - skipping notarization (curl installs still work)"
+          fi
+          echo "ZIP=$ZIP" >> "$GITHUB_ENV"
+
+      - name: Upload release asset
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" "$ZIP" \
+            --title "$GITHUB_REF_NAME" --generate-notes ||
+          gh release upload "$GITHUB_REF_NAME" "$ZIP" --clobber
