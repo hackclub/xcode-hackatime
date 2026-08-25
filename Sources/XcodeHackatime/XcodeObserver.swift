@@ -334,9 +334,12 @@ final class XcodeObserver {
     /// true only when the state refresh actually ran (throttled otherwise),
     /// so callers can avoid reporting activity on stale state
     private func updateCursor(from editor: AXUIElement) -> Bool {
-        guard let sel = AX.range(editor, kAXSelectedTextRangeAttribute as String) else { return false }
+        // throttle before any AX read: Xcode fires several notifications per
+        // keystroke, and each read is a synchronous round trip serviced by
+        // Xcode's main thread
         let now = Date()
         guard now.timeIntervalSince(lastExpensiveUpdate) >= Self.expensiveRefreshInterval else { return false }
+        guard let sel = AX.range(editor, kAXSelectedTextRangeAttribute as String) else { return false }
         lastExpensiveUpdate = now
         // refresh path and offset together or not at all: an in-pane file
         // swap (ctrl-cmd-left) emits no focus notification, so a partial
@@ -361,8 +364,10 @@ final class XcodeObserver {
     /// (AXStringForRange) and counting newlines; cost is proportional to the
     /// prefix, never the whole file. AX requests are serviced on Xcode's
     /// main thread, so give up past this many utf-16 units rather than stall
-    /// it (line/column is optional metadata)
-    private static let maxPrefixLength = 1_000_000
+    /// it (line/column is optional metadata). sized so the worst fetch stays
+    /// a few ms, under one 60Hz frame: ~2.4M units measured ~30ms live, and
+    /// heartbeats can send once per second while hopping between files
+    private static let maxPrefixLength = 262_144
 
     private func position(in editor: AXUIElement, forOffset offset: Int) -> (line: Int, column: Int)? {
         guard offset >= 0, offset <= Self.maxPrefixLength else { return nil }

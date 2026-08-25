@@ -71,7 +71,7 @@ saves.
 | State refresh throttle | 1s | XcodeObserver.expensiveRefreshInterval | AX reads block Xcode's main thread; heartbeats are throttled harder anyway. |
 | Re-sync / quiet tick | 20s | XcodeObserver timer | Attach recovery, stale-pid reconcile, state refresh, disk-write poll. |
 | HID recency | 10s | XcodeObserver.inputRecencyWindow | Real typing produces an AX event within milliseconds of a keystroke. |
-| Prefix cap | 1M UTF-16 units | XcodeObserver.maxPrefixLength | Line/column is optional metadata; a multi-megabyte AX prefix fetch stalls Xcode's main thread. |
+| Prefix cap | 256K UTF-16 units | XcodeObserver.maxPrefixLength | Line/column is optional metadata; the AX prefix fetch stalls Xcode's main thread in proportion to the caret offset (~30ms measured at 2.4M units), so the cap keeps the worst heartbeat-time stall to a few ms, under one 60Hz frame. |
 | Paste guard | \|delta\| > 50 lines | HeartbeatEngine (phase 4) | a >50-line jump in either direction in one save is a paste, generation or bulk delete, not typing - the delta is dropped, the write still counts. (Symmetric, unlike vscode-wakatime's positive-only guard; a live -99 external cleanup proved the need.) |
 | Trust probe fallback | 10s waiting / 300s trusted | main.swift timers | Fresh-process TCC reads are primarily *event-driven* (the `com.apple.accessibility.api` distributed notification fires on any Accessibility-list change); the timers only cover missed notifications; the trusted-side fallback is the 5-minute maintenance tick's sole remaining job. |
 
