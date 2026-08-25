@@ -84,11 +84,13 @@ enum Installer {
 
     /// user-visible macOS banner via osascript (an unbundled binary cannot
     /// use UNUserNotificationCenter). escapes the body, posts off the
-    /// calling thread and rate-limits to one banner per 10 minutes.
-    private static var lastBanner: Date = .distantPast
+    /// calling thread and rate-limits each distinct message to one banner
+    /// per 10 minutes (per-message, so a grant banner cannot swallow the
+    /// tracker banner that follows it).
+    private static var lastBannerAt: [String: Date] = [:]
     static func postBanner(_ body: String) {
-        guard Date().timeIntervalSince(lastBanner) > 600 else { return }
-        lastBanner = Date()
+        guard Date().timeIntervalSince(lastBannerAt[body] ?? .distantPast) > 600 else { return }
+        lastBannerAt[body] = Date()
         let escaped = body.replacingOccurrences(of: "\\", with: "\\\\")
             .replacingOccurrences(of: "\"", with: "\\\"")
         DispatchQueue.global(qos: .utility).async {
