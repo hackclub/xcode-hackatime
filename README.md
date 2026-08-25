@@ -1,9 +1,7 @@
-> [!WARNING]  
-> This is currently unreleased for a reason!
->
-> This codebase was heavily written with Fable and GPT-5.6 Sol. And whilst it works on my
-> machine, I do still want to verify that this works across macOS versions and clean up the
-> code a bit. Beware!
+> [!NOTE]
+> Early release. Live-tested against real Xcode on one machine so far;
+> releases are interim-signed (not notarized), so install via the curl
+> command below rather than a browser download. Report anything weird!
 
 ---
 
@@ -32,9 +30,10 @@ swift build -c release
 .build/release/xcode-hackatime install
 ```
 
-Then grant permission once: **System Settings → Privacy & Security →
-Accessibility → enable `xcode-hackatime`**. Tracking starts immediately; the
-agent auto-starts at login and reattaches whenever Xcode launches or quits.
+Then grant permission once: **System Settings -> Privacy & Security ->
+Accessibility -> enable `xcode-hackatime`** (an onboarding window walks you
+through it). Tracking starts immediately; the agent auto-starts at login and
+reattaches whenever Xcode launches or quits.
 
 ## Commands
 
@@ -43,7 +42,12 @@ agent auto-starts at login and reattaches whenever Xcode launches or quits.
 | `install` | Copy binary to `~/.wakatime`, register launchd agent, start |
 | `uninstall` | Stop and remove the agent |
 | `status` | launchd state + recent log lines |
+| `doctor` | Check every link in the tracking chain, with a fix per failure |
 | `probe` | Dump Xcode's Accessibility state (diagnostics) |
 | `run` | Run in the foreground (what launchd invokes) |
+| `version` | Print the version |
 
-Logs: `~/.wakatime/xcode-hackatime.log`
+Logs live in the unified log (`status` prints the tail, or stream with
+Console.app); `~/.wakatime/xcode-hackatime.log` holds crash traces only.
+
+How it works, and why it works that way: [DESIGN.md](DESIGN.md).

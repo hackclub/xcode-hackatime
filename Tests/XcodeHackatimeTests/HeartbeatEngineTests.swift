@@ -2,7 +2,7 @@ import XCTest
 
 @testable import xcode_hackatime
 
-/// seams inject the clock and the CLI launch; files are real temp files so
+/// the clock and the CLI launch are injected; files are real temp files so
 /// mtime and line-count reads exercise real I/O
 final class HeartbeatEngineTests: XCTestCase {
     private var engine: HeartbeatEngine!

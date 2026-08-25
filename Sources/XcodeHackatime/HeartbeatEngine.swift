@@ -50,10 +50,10 @@ final class HeartbeatEngine {
     /// autosave batch draining one send per tick
     private var pendingSendFiles: Set<String> = []
 
-    /// test seam: throttling, staleness and write recency are untestable
+    /// injectable for tests: throttling, staleness and write recency are untestable
     /// against the wall clock
     var now: () -> Date = { Date() }
-    /// test seam replacing the cli launch
+    /// injectable for tests, replacing the cli launch
     var invokeCLIOverride: (([String]) -> Bool)?
 
     init(log: @escaping (String) -> Void) {
@@ -343,4 +343,4 @@ final class HeartbeatEngine {
     }
 }
 
-let appVersion = "0.3.0"
+let appVersion = "0.4.0"
