@@ -1,13 +1,15 @@
 import AppKit
 
-/// `xcode-hackatime notify <message>` posts a user notification through
-/// UNUserNotificationCenter. that API refuses unbundled binaries, so this
-/// subcommand only works when the binary runs from inside the Hackatime.app
-/// helper bundle that install assembles; the agent invokes it there, and a
-/// missing helper means no banner (banners are best-effort, and never wear
-/// another app's identity). the payoff is a real notification identity: our
-/// name, our icon and a Focus-manageable app the user can allow through.
+/// `xcode-hackatime notify <message>` posts a user notification. delivery
+/// needs a bundle identity, so this subcommand only works when the binary
+/// runs from inside the Hackatime.app helper bundle that install assembles;
+/// the agent invokes it there, and a missing helper means no banner (banners
+/// are best-effort, and never wear another app's identity). the payoff is a
+/// real notification identity: our name, our icon and a Focus-manageable
+/// app the user can allow through.
 enum Notifier {
+    static let bundleID = "com.hackclub.hackatime.notifier"
+
     static func run(message: String) -> Never {
         // bundleIdentifier resolves only inside the helper bundle; an
         // unbundled invocation has no notification identity.
@@ -27,6 +29,42 @@ enum Notifier {
         // give the notification daemon a beat before this process exits.
         Thread.sleep(forTimeInterval: 0.7)
         exit(0)
+    }
+
+    enum Approval {
+        case approved, alreadyApproved, notRegistered
+    }
+
+    /// macOS registers a first-time notification source in a suppressed
+    /// pending state: deliver() reports success but nothing shows until the
+    /// source's entry in the com.apple.ncprefs domain gains the approved
+    /// bits, and NSUserNotification sources never get an approval prompt to
+    /// clear it. there is no API for that, so this edits the preference the
+    /// way the Settings pane does - clear the pending bit, set auth to
+    /// allowed - and bounces usernoted to reload it. verified live: the
+    /// suppressed entry read flags 0x1280200e / auth 6, Script Editor's
+    /// delivering entry reads 0x280200e, and clearing bit 28 plus auth 7
+    /// made banners appear. install is the only caller, so a user who later
+    /// turns Hackatime off in System Settings stays off.
+    static func approveDelivery() -> Approval {
+        let domain = "com.apple.ncprefs" as CFString
+        let key = "apps" as CFString
+        let pendingBit = 1 << 28
+        guard
+            var apps = CFPreferencesCopyValue(key, domain, kCFPreferencesCurrentUser, kCFPreferencesAnyHost)
+                as? [[String: Any]],
+            let index = apps.firstIndex(where: { $0["bundle-id"] as? String == bundleID })
+        else { return .notRegistered }
+        let flags = apps[index]["flags"] as? Int ?? 0
+        if flags & pendingBit == 0 && apps[index]["auth"] as? Int == 7 { return .alreadyApproved }
+        apps[index]["flags"] = flags & ~pendingBit
+        apps[index]["auth"] = 7
+        CFPreferencesSetValue(key, apps as CFArray, domain, kCFPreferencesCurrentUser, kCFPreferencesAnyHost)
+        CFPreferencesSynchronize(domain, kCFPreferencesCurrentUser, kCFPreferencesAnyHost)
+        // usernoted caches the domain; a bounce makes it reload. launchd
+        // respawns it immediately.
+        Installer.shell("/usr/bin/killall", ["usernoted"])
+        return .approved
     }
 
     /// render our icon (SF symbol on a Hack Club red rounded square) into

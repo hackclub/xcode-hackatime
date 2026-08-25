@@ -115,7 +115,7 @@ enum Installer {
             try fm.createDirectory(atPath: macos, withIntermediateDirectories: true)
             try fm.createDirectory(atPath: resources, withIntermediateDirectories: true)
             let info: [String: Any] = [
-                "CFBundleIdentifier": "com.hackclub.hackatime.notifier",
+                "CFBundleIdentifier": Notifier.bundleID,
                 "CFBundleName": "Hackatime",
                 "CFBundleDisplayName": "Hackatime",
                 "CFBundleExecutable": "hackatime-notifier",
@@ -136,15 +136,40 @@ enum Installer {
             // sign the bundle so its code identity matches its bundle id
             // (ad-hoc suffices for notification delivery; verified live).
             shell(
-                "/usr/bin/codesign", ["-f", "-s", "-", "--identifier", "com.hackclub.hackatime.notifier", notifierApp])
+                "/usr/bin/codesign", ["-f", "-s", "-", "--identifier", Notifier.bundleID, notifierApp])
             // let LaunchServices resolve the bundle id and icon.
             shell(
                 "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister",
                 ["-f", notifierApp])
         } catch {
             print(
-                "note: could not assemble the notification helper (\(error.localizedDescription)); banners fall back to Script Editor."
+                "note: could not assemble the notification helper (\(error.localizedDescription)); banners are skipped."
             )
+        }
+    }
+
+    /// first delivery registers the helper with Notification Center in a
+    /// suppressed pending state, so a plain notify at install time shows
+    /// nothing. deliver once to register, approve the fresh entry, then
+    /// deliver again so the install banner is actually seen. install-only:
+    /// re-approving behind a user who turned notifications off in System
+    /// Settings would be hostile, so the agent never calls this.
+    static func primeNotifier(_ message: String) {
+        guard FileManager.default.isExecutableFile(atPath: notifierBinary) else { return }
+        shell(notifierBinary, ["notify", message])
+        // the ncprefs entry appears asynchronously after the first delivery.
+        for _ in 0..<10 {
+            switch Notifier.approveDelivery() {
+            case .alreadyApproved:
+                return  // the first delivery was already visible.
+            case .approved:
+                // give the bounced usernoted a moment to come back.
+                Thread.sleep(forTimeInterval: 1)
+                shell(notifierBinary, ["notify", message])
+                return
+            case .notRegistered:
+                Thread.sleep(forTimeInterval: 0.3)
+            }
         }
     }
 
@@ -292,13 +317,11 @@ enum Installer {
         // explicit user action, so a window is expected. it self-suppresses
         // when the agent is already tracking.
         Onboarding.spawnIfNeeded(afterInstall: true)
-        // give banners a real Hackatime identity; the priming call triggers
-        // the one-time "Hackatime wants to send notifications" authorization
-        // at a moment the user is already paying attention.
+        // give banners a real Hackatime identity, and approve delivery while
+        // the user is already paying attention (macOS never prompts for
+        // NSUserNotification sources; without this every banner is silent).
         installNotifierApp()
-        shell(
-            notifierBinary,
-            ["notify", "Notifications are set up - Hackatime posts important tracking events here."])
+        primeNotifier("Notifications are set up - Hackatime posts important tracking events here.")
         return 0
     }
 

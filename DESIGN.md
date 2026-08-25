@@ -144,7 +144,12 @@ saves.
     silently auto-denies authorization outside a full app lifecycle
     (verified live against ad-hoc signing, a real developer certificate, a
     pumped run loop and a LaunchServices launch), while the deprecated API
-    has delivered from bundled CLI helpers for a decade. The helper also
+    has delivered from bundled CLI helpers for a decade. macOS registers an
+    NSUserNotification source suppressed-pending with no approval prompt
+    ever coming, so install approves delivery itself (clear the pending bit
+    and set auth in `com.apple.ncprefs`, bounce usernoted, re-deliver the
+    install banner); only install does this - a user's later off toggle in
+    System Settings is never overridden. The helper also
     gives users the sanctioned Focus path: a real "Hackatime" entry they
     can style as Alerts and allow through Focus modes. True Focus bypass
     (critical alerts) is Apple-gated and wrong for a time tracker anyway.
