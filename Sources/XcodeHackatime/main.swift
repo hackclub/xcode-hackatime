@@ -9,10 +9,13 @@ import os
 /// is only readable on this Mac, unlike a world-readable file.
 private let osLogger = Logger(subsystem: Installer.label, category: "agent")
 
+private let stampFormatter = ISO8601DateFormatter()
+
 func logLine(_ message: String) {
-    // the codebase-wide convention marks problems with a "warning:" prefix;
-    // route those to the error level so Console and log-show predicates can
-    // filter them from routine chatter.
+    // agent log messages that report problems start with "warning:"; route
+    // those to the error level so Console and log-show predicates can
+    // filter them from routine chatter. (installer output uses print and
+    // does not pass through here.)
     if message.hasPrefix("warning:") {
         osLogger.error("\(message, privacy: .public)")
     } else {
@@ -21,8 +24,7 @@ func logLine(_ message: String) {
     // also print, for live output in foreground runs. under launchd stdout
     // is discarded; the unified log is the record, and the log file only
     // captures stderr (crash traces).
-    let stamp = ISO8601DateFormatter().string(from: Date())
-    print("[\(stamp)] \(message)")
+    print("[\(stampFormatter.string(from: Date()))] \(message)")
     fflush(stdout)
 }
 
@@ -77,7 +79,7 @@ func runAgent() -> Never {
         logLine("waiting for Accessibility permission…")
         // a trusted start that finds this marker knows onboarding just
         // completed and posts the one-time "tracking started" banner.
-        Installer.touchMarker(Installer.grantPendingMarker)
+        Installer.touchMarker(Onboarding.grantPendingMarker)
         // a TCC grant does not propagate to an already-running process (the
         // AX framework caches the denial), but a *fresh* process always
         // reads fresh TCC state. so the checks below spawn ourselves as a
@@ -117,20 +119,18 @@ func runAgent() -> Never {
     logLine("Accessibility permission OK")
     // close the onboarding loop: transitioning from waiting to trusted
     // deserves a visible win-state, not silence. once per grant cycle.
-    if FileManager.default.fileExists(atPath: Installer.grantPendingMarker) {
-        try? FileManager.default.removeItem(atPath: Installer.grantPendingMarker)
-        Installer.shell(
-            "/usr/bin/osascript",
-            ["-e", "display notification \"You're all set - Xcode time counts from now.\" with title \"Hackatime\""])
+    if Installer.consumeMarker(Onboarding.grantPendingMarker) {
+        Installer.postBanner("You're all set - Xcode time counts from now.")
     }
-    try? FileManager.default.removeItem(atPath: Installer.regrantMarker)
+    Installer.consumeMarker(Onboarding.regrantMarker)
     // tells any onboarding window that tracking has started, so it dismisses.
     Installer.touchMarker(Onboarding.trustedMarker)
     // a past "user closed the onboarding window" no longer applies once
     // trusted; clear it so onboarding returns if permission is ever revoked.
     try? FileManager.default.removeItem(atPath: Onboarding.dismissedMarker)
 
-    Installer.disableCompetingXcodeTracker(report: logLine, notifyUser: true)
+    // no eager disable call: the watcher fires once at attach, which runs
+    // the same re-check.
     Installer.startCompetingTrackerWatcher(report: logLine)
 
     let engine = HeartbeatEngine(log: logLine)
@@ -173,13 +173,12 @@ func runAgent() -> Never {
     DistributedNotificationCenter.default().addObserver(
         forName: axChangedNotification, object: nil, queue: .main
     ) { _ in revocationCheck() }
-    // slow maintenance tick. the WakaTime.app guard is fully event-driven
-    // (the preferences watcher re-checks on every attach), so this only
-    // covers what has no event source: log growth, and TCC revocation when
-    // the undocumented axChangedNotification fails to arrive. five-minute
-    // worst-case detection is acceptable for a fallback path.
+    // slow maintenance tick with one job: TCC revocation when the
+    // undocumented axChangedNotification fails to arrive. five-minute
+    // worst-case detection is acceptable for a fallback path. (log trimming
+    // is startup-only; the file holds crash stderr and a crash loop trims
+    // itself via constant relaunches.)
     Timer.scheduledTimer(withTimeInterval: 300, repeats: true) { _ in
-        Installer.trimLogIfNeeded()
         revocationCheck()
     }
 

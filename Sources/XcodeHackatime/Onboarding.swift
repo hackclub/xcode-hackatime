@@ -16,6 +16,13 @@ enum Onboarding {
     static var trustedMarker: String { Installer.installDir + "/.ax-trusted" }
     /// touched when the user closes the window without granting permission.
     static var dismissedMarker: String { Installer.installDir + "/.onboarding-dismissed" }
+    /// touched by a reinstall over an existing binary: the Accessibility row
+    /// exists but its grant is stale, so the walkthrough shows off-then-on
+    /// steps. the agent consumes it once trusted.
+    static var regrantMarker: String { Installer.installDir + "/.regrant-pending" }
+    /// touched while the agent waits for the grant; a trusted start that
+    /// consumes it posts the one-time "tracking started" banner.
+    static var grantPendingMarker: String { Installer.installDir + "/.grant-pending" }
 
     /// true if an onboarding window process is already alive. the onboard
     /// process holds an exclusive flock on the pid file for its lifetime, and
@@ -43,99 +50,67 @@ enum Onboarding {
 
     /// `afterInstall` bypasses the Xcode-session dismissal memory: install is
     /// an explicit user action, so the walkthrough is expected even when
-    /// Xcode is closed or an old dismissal exists.
+    /// Xcode is closed or an old dismissal exists. a freshly-trusted agent
+    /// (marker touched moments ago) means there is nothing to onboard.
     static func spawnIfNeeded(afterInstall: Bool = false) {
         guard !isRunning() else { return }
-        guard afterInstall || !dismissedThisXcodeSession() else { return }
+        if afterInstall {
+            if let trusted = FileManager.default.modificationDate(atPath: trustedMarker),
+                Date().timeIntervalSince(trusted) < 15
+            {
+                return
+            }
+        } else {
+            guard !dismissedThisXcodeSession() else { return }
+        }
         // spawn our own binary, not the installed copy. they differ when
         // running from a build directory during development.
         Installer.spawnSelf(["onboard"], discardOutput: false)
     }
 
     static func run() -> Int32 {
-        // already tracking: a marker touched moments ago means the agent
-        // started trusted (e.g. install spawned us needlessly). nothing to
-        // onboard.
-        if let trusted = FileManager.default.modificationDate(atPath: trustedMarker),
-            Date().timeIntervalSince(trusted) < 15
-        {
-            return 0
-        }
-        Installer.ensureInstallDir()
-        // hold an exclusive lock on the pid file for our whole lifetime (we
-        // deliberately never close the fd); see isRunning().
-        let fd = open(pidFile, O_WRONLY | O_CREAT, 0o644)
-        guard fd >= 0, flock(fd, LOCK_EX | LOCK_NB) == 0 else {
+        guard Installer.acquireSingletonLock(pidFile) else {
             return 0  // another onboarding window is already up
         }
-        ftruncate(fd, 0)
-        "\(ProcessInfo.processInfo.processIdentifier)\n".withCString { _ = write(fd, $0, strlen($0)) }
         let launchedAt = Date()
-
-        let app = NSApplication.shared
-        app.setActivationPolicy(.accessory)
 
         // after a reinstall the Accessibility row already exists but the
         // grant is stale; the accurate instruction is off-and-on.
-        let regrant = FileManager.default.fileExists(atPath: Installer.regrantMarker)
-        let window = OnboardingUI.makeWindow(
+        let regrant = FileManager.default.fileExists(atPath: regrantMarker)
+
+        // Xcode-quit dismissal (the window only makes sense alongside Xcode
+        // once one was seen; not a user dismissal, so it returns on the next
+        // launch) rides workspace notifications, not per-tick polling.
+        var sawXcode = XcodeObserver.runningXcode() != nil
+        XcodeObserver.onXcodeNotification(NSWorkspace.didLaunchApplicationNotification) { _ in sawXcode = true }
+        XcodeObserver.onXcodeNotification(NSWorkspace.didTerminateApplicationNotification) { _ in
+            if sawXcode { finish(dismissedByUser: false) }
+        }
+
+        OnboardingUI.runWindow(
             .init(
                 icon: "clock.badge.checkmark",
                 title: "One step to start tracking Xcode",
                 subtitle:
                     "Hackatime needs Accessibility permission to see which file and line you're working on in Xcode. It never reads your keystrokes in other apps, and your code never leaves your Mac.",
-                steps: regrant
-                    ? [
-                        "Click “Open Accessibility Settings” below",
-                        "Find “xcode-hackatime” in the list",
-                        "Turn its toggle OFF, then ON (the update reset it)",
-                    ]
-                    : [
-                        "Click “Open Accessibility Settings” below",
-                        "Find “xcode-hackatime” in the list",
-                        "Turn its toggle on",
-                    ],
+                steps: [
+                    "Click “Open Accessibility Settings” below",
+                    "Find “xcode-hackatime” in the list",
+                    regrant ? "Turn its toggle OFF, then ON (the update reset it)" : "Turn its toggle on",
+                ],
                 buttonTitle: "Open Accessibility Settings",
                 buttonURL: URL(
                     string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"),
-                footer: "This window closes by itself once tracking starts."))
-        window.center()
-        window.makeKeyAndOrderFront(nil)
-        app.activate(ignoringOtherApps: true)
-
-        // dismiss when the user closes the window, or when Xcode quits after
-        // having been seen running (not a user dismissal, so the window
-        // returns on the next Xcode launch). when tracking starts, flip to a
-        // short success state first: silence reads as "did it work?".
-        var sawXcode = false
-        var celebrating = false
-        Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { _ in
-            if !window.isVisible {
-                finish(dismissedByUser: !celebrating)
-            }
-            if celebrating { return }
-            if let mtime = FileManager.default.modificationDate(atPath: trustedMarker),
-                mtime > launchedAt
-            {
-                celebrating = true
-                OnboardingUI.apply(
-                    .init(
-                        icon: "checkmark.seal.fill", iconColor: .systemGreen,
-                        title: "You're all set!",
-                        subtitle: "Hackatime is tracking Xcode now. Happy hacking!",
-                        footer: ""), to: window)
-                DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { finish(dismissedByUser: false) }
-                return
-            }
-            if XcodeObserver.runningXcode() != nil {
-                sawXcode = true
-            } else if sawXcode {
-                finish(dismissedByUser: false)
-            }
-        }
-
-        app.run()
-        return 0
+                footer: "This window closes by itself once tracking starts."),
+            pollEvery: 0.5,
+            isComplete: {
+                guard let mtime = FileManager.default.modificationDate(atPath: trustedMarker) else { return false }
+                return mtime > launchedAt
+            },
+            successTitle: "You're all set!",
+            successSubtitle: "Hackatime is tracking Xcode now. Happy hacking!",
+            onDismiss: { byUser in finish(dismissedByUser: byUser) }
+        )
     }
 
     /// NSApplication.terminate never returns, so cleanup cannot live after
@@ -153,11 +128,20 @@ enum Onboarding {
 /// an invitation, never a gate: closing it is respected (no respawn) and
 /// tracking starts automatically the moment a key exists, window or not.
 enum KeySetup {
+    static var pidFile: String { Installer.installDir + "/xcode-hackatime-setupkey.pid" }
+
     static func run() -> Int32 {
         if Installer.apiKeyConfigured() { return 0 }
-        let app = NSApplication.shared
-        app.setActivationPolicy(.accessory)
-        let window = OnboardingUI.makeWindow(
+        guard Installer.acquireSingletonLock(pidFile) else {
+            return 0  // another key-setup window is already up
+        }
+        // watch the config instead of forking the CLI every poll: the key
+        // probe only runs after the file actually changed (the watcher also
+        // fires once at attach, covering a key written moments ago).
+        var configChanged = false
+        Installer.watchFile(NSHomeDirectory() + "/.wakatime.cfg") { configChanged = true }
+
+        OnboardingUI.runWindow(
             .init(
                 icon: "key.horizontal.fill",
                 title: "Connect your Hackatime account",
@@ -169,29 +153,20 @@ enum KeySetup {
                     "Come back and code - that's it",
                 ],
                 buttonTitle: "Open Hackatime Setup",
-                buttonURL: URL(string: "https://hackatime.hackclub.com/my/wakatime_setup"),
-                footer: "Closes by itself once your key is set. Closing it early is fine too."))
-        window.center()
-        window.makeKeyAndOrderFront(nil)
-        app.activate(ignoringOtherApps: true)
-
-        var celebrating = false
-        Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { _ in
-            if !window.isVisible { exit(0) }  // user closed: respected, no nagging
-            if celebrating { return }
-            if Installer.apiKeyConfigured() {
-                celebrating = true
-                OnboardingUI.apply(
-                    .init(
-                        icon: "checkmark.seal.fill", iconColor: .systemGreen,
-                        title: "Connected!",
-                        subtitle: "Your Hackatime key is set. Time in Xcode counts from here on.",
-                        footer: ""), to: window)
-                DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { exit(0) }
+                buttonURL: URL(string: Installer.setupURL),
+                footer: "Closes by itself once your key is set. Closing it early is fine too."),
+            pollEvery: 1,
+            isComplete: {
+                guard configChanged else { return false }
+                configChanged = false
+                return Installer.apiKeyConfigured()
+            },
+            successTitle: "Connected!",
+            successSubtitle: "Your Hackatime key is set. Time in Xcode counts from here on.",
+            onDismiss: { _ in
+                try? FileManager.default.removeItem(atPath: pidFile)
+                exit(0)
             }
-        }
-
-        app.run()
-        return 0
+        )
     }
 }

@@ -155,6 +155,47 @@ enum OnboardingUI {
         return card
     }
 
+    /// the shared window run-loop: present, poll, flip to a green win-state
+    /// when complete, dwell 2.5s, exit. `onDismiss(byUser:)` must not
+    /// return; it receives true only when the user closed the window before
+    /// completion. `tick` runs each poll for extra caller rules.
+    static func runWindow(
+        _ content: Content,
+        pollEvery: TimeInterval,
+        isComplete: @escaping () -> Bool,
+        successTitle: String,
+        successSubtitle: String,
+        onDismiss: @escaping (_ byUser: Bool) -> Never,
+        tick: (() -> Void)? = nil
+    ) -> Never {
+        let app = NSApplication.shared
+        app.setActivationPolicy(.accessory)
+        let window = makeWindow(content)
+        window.center()
+        window.makeKeyAndOrderFront(nil)
+        app.activate(ignoringOtherApps: true)
+
+        var celebrating = false
+        Timer.scheduledTimer(withTimeInterval: pollEvery, repeats: true) { _ in
+            if !window.isVisible {
+                onDismiss(!celebrating)
+            }
+            if celebrating { return }
+            tick?()
+            if isComplete() {
+                celebrating = true
+                apply(
+                    .init(
+                        icon: "checkmark.seal.fill", iconColor: .systemGreen,
+                        title: successTitle, subtitle: successSubtitle, footer: ""),
+                    to: window)
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { onDismiss(false) }
+            }
+        }
+        app.run()
+        exit(0)
+    }
+
     final class ButtonTarget: NSObject {
         static let shared = ButtonTarget()
         var url: URL?

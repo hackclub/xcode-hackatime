@@ -15,13 +15,18 @@ enum Installer {
     /// it: a reinstall invalidates the TCC grant for ad-hoc builds, and
     /// leaving the marker would suppress the re-prompt forever.
     static var axPromptedMarker: String { installDir + "/.ax-prompted" }
-    /// touched by a reinstall over an existing binary: the Accessibility row
-    /// exists but its grant is stale, so onboarding shows off-then-on steps.
-    /// the agent removes it once trusted.
-    static var regrantMarker: String { installDir + "/.regrant-pending" }
-    /// touched while the agent waits for the grant; a trusted start that
-    /// finds it posts the one-time "tracking started" banner and removes it.
-    static var grantPendingMarker: String { installDir + "/.grant-pending" }
+    /// where anyone signs up / fetches a key; the one copy of this URL.
+    static let setupURL = "https://hackatime.hackclub.com/my/wakatime_setup"
+
+    /// every marker and pid file, for uninstall's sweep. new state files
+    /// must be added here or they leak across uninstall/reinstall.
+    static var allStateFiles: [String] {
+        [
+            axPromptedMarker, Onboarding.trustedMarker, Onboarding.dismissedMarker,
+            Onboarding.regrantMarker, Onboarding.grantPendingMarker,
+            Onboarding.pidFile, KeySetup.pidFile,
+        ]
+    }
 
     /// absolute path to this executable. argv[0] is whatever the user typed
     /// at the shell (a bare name when found via $PATH), so never use it as
@@ -54,6 +59,72 @@ enum Installer {
     static func touchMarker(_ path: String) {
         ensureInstallDir()
         FileManager.default.createFile(atPath: path, contents: Data())
+    }
+
+    /// remove a marker if present; true when it existed. markers are
+    /// one-shot signals, so read-and-clear is the normal consumption.
+    @discardableResult
+    static func consumeMarker(_ path: String) -> Bool {
+        guard FileManager.default.fileExists(atPath: path) else { return false }
+        try? FileManager.default.removeItem(atPath: path)
+        return true
+    }
+
+    /// take the single-instance flock for a window process. the fd stays
+    /// open for the process lifetime; the kernel drops the lock at exit, so
+    /// stale files and recycled pids cannot fool it.
+    static func acquireSingletonLock(_ path: String) -> Bool {
+        ensureInstallDir()
+        let fd = open(path, O_WRONLY | O_CREAT, 0o644)
+        guard fd >= 0, flock(fd, LOCK_EX | LOCK_NB) == 0 else { return false }
+        ftruncate(fd, 0)
+        "\(ProcessInfo.processInfo.processIdentifier)\n".withCString { _ = write(fd, $0, strlen($0)) }
+        return true
+    }
+
+    /// user-visible macOS banner via osascript (an unbundled binary cannot
+    /// use UNUserNotificationCenter). escapes the body, posts off the
+    /// calling thread and rate-limits to one banner per 10 minutes.
+    private static var lastBanner: Date = .distantPast
+    static func postBanner(_ body: String) {
+        guard Date().timeIntervalSince(lastBanner) > 600 else { return }
+        lastBanner = Date()
+        let escaped = body.replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+        DispatchQueue.global(qos: .utility).async {
+            shell("/usr/bin/osascript", ["-e", "display notification \"\(escaped)\" with title \"Hackatime\""])
+        }
+    }
+
+    /// prove the whole auth path (key, network, backend) via the CLI.
+    static func todayCheck() -> (ok: Bool, detail: String) {
+        let (status, out) = shell(wakatimeCLIPath, ["--today"])
+        let trimmed = out.trimmingCharacters(in: .whitespacesAndNewlines)
+        return status == 0
+            ? (true, "connected (\(trimmed) tracked today)")
+            : (false, "wakatime-cli --today failed (exit \(status))")
+    }
+
+    /// launchctl print for our job; `field` plucks one "key = ..." line.
+    static func launchdJob() -> (loaded: Bool, field: (String) -> String?) {
+        let (status, out) = shell("/bin/launchctl", ["print", "gui/\(getuid())/\(label)"])
+        let lines = out.split(separator: "\n")
+        return (
+            status == 0,
+            { key in lines.first { $0.contains(key) }?.trimmingCharacters(in: .whitespaces) }
+        )
+    }
+
+    /// unified-log lines for our subsystem, header row dropped.
+    static func unifiedLogLines(last: String) -> [String] {
+        let (status, out) = shell(
+            "/usr/bin/log",
+            [
+                "show", "--last", last, "--style", "compact",
+                "--predicate", "subsystem == \"\(label)\"",
+            ])
+        guard status == 0 else { return [] }
+        return out.split(separator: "\n").dropFirst().map(String.init)
     }
 
     /// the file only holds stderr (crash traces) and launchd never rotates
@@ -92,7 +163,7 @@ enum Installer {
             // old agent keeps its vnode across the rename; only the
             // bootout/bootstrap below replaces it).
             if selfPath != installedBinary {
-                if fm.fileExists(atPath: installedBinary) { touchMarker(regrantMarker) }
+                if fm.fileExists(atPath: installedBinary) { touchMarker(Onboarding.regrantMarker) }
                 let staged = installedBinary + ".new"
                 try? fm.removeItem(atPath: staged)
                 try fm.copyItem(atPath: selfPath, toPath: staged)
@@ -130,7 +201,6 @@ enum Installer {
 
         disableCompetingXcodeTracker()
         let cliInstalled = ensureWakatimeCLI()
-        let keyConfigured = checkAPIKey()
 
         guard cliInstalled else {
             print("")
@@ -139,20 +209,20 @@ enum Installer {
             print("   ~/.wakatime/wakatime-cli exists. Re-run install to retry.")
             return 1
         }
-        if keyConfigured {
-            // prove the whole auth path now, while the user is still looking
-            // at the terminal, instead of days later when stats are missing.
-            let (todayStatus, todayOut) = shell(wakatimeCLIPath, ["--today"])
-            if todayStatus == 0 {
-                print(
-                    "✓ connected to your WakaTime backend (\(todayOut.trimmingCharacters(in: .whitespacesAndNewlines)) tracked today)"
-                )
-            } else {
-                print("⚠️  wakatime-cli --today failed (exit \(todayStatus)): the api_key in")
-                print("   ~/.wakatime.cfg may be wrong. https://hackatime.hackclub.com/my/wakatime_setup")
-                print("   writes a fresh one. run 'xcode-hackatime doctor' to re-check.")
-            }
+        // prove the whole auth path now, while the user is still looking at
+        // the terminal, instead of days later when stats are missing. a
+        // passing --today already proves a key exists, so the key probe
+        // only runs to split "bad key" from "no key".
+        let today = todayCheck()
+        if today.ok {
+            print("✓ \(today.detail)")
+        } else if apiKeyConfigured() {
+            print("⚠️  \(today.detail): the api_key in ~/.wakatime.cfg may be wrong.")
+            print("   \(setupURL) writes a fresh one. run 'xcode-hackatime doctor' to re-check.")
         } else {
+            print("")
+            print("⚠️  No api_key found in ~/.wakatime.cfg.")
+            print("   \(setupURL) writes it for you.")
             // an invitation, never a gate: the window is closable and
             // tracking starts on its own the moment a key exists.
             spawnSelf(["setup-key"], discardOutput: false)
@@ -198,16 +268,20 @@ enum Installer {
         }
         let source = DispatchSource.makeFileSystemObjectSource(
             fileDescriptor: fd, eventMask: [.write, .extend, .delete, .rename], queue: .main)
-        source.setEventHandler {
+        // weak captures: a dispatch source retains its handler blocks, so a
+        // strong `source` here would be a retain cycle that leaks one source
+        // per atomic replace for the life of the agent.
+        source.setEventHandler { [weak source] in
+            guard let source else { return }
             let events = source.data
             onChange()
             if events.contains(.delete) || events.contains(.rename) {
                 source.cancel()
             }
         }
-        source.setCancelHandler {
+        source.setCancelHandler { [weak source] in
             close(fd)
-            watchers.removeAll { $0 === source }
+            if let source { watchers.removeAll { $0 === source } }
             DispatchQueue.main.asyncAfter(deadline: .now() + 1) { watchFile(path, onChange: onChange) }
         }
         watchers.append(source)
@@ -219,9 +293,10 @@ enum Installer {
     }
 
     /// event-driven guard for decision 15: watch WakaTime.app's preferences
-    /// and re-disable its Xcode tracking the moment it reappears. the 60s
-    /// tick remains the fallback for missed events. our own rewrite also
-    /// fires the watcher once; the re-check is then a no-op.
+    /// and re-disable its Xcode tracking the moment it reappears. there is
+    /// no polling fallback; the watcher's attach-time fire carries the
+    /// ownership across replaces. our own rewrite also fires the watcher
+    /// once; the re-check is then a no-op.
     static func startCompetingTrackerWatcher(report: @escaping (String) -> Void) {
         let plist = NSHomeDirectory() + "/Library/Preferences/\(wakaTimeAppBundleID).plist"
         watchFile(plist) {
@@ -240,37 +315,36 @@ enum Installer {
     /// callers therefore re-run this whenever the list can have reappeared
     /// (WakaTime.app reinstalls preserve preferences, but wipes and fresh
     /// first-runs do not). it does nothing when Xcode is not in the list.
-    /// notifications rate-limit so a fighting writer cannot spam banners.
-    private static var lastTrackerNotification: Date = .distantPast
-
     static func disableCompetingXcodeTracker(report: (String) -> Void = { print($0) }, notifyUser: Bool = false) {
-        guard competingXcodeTrackerEnabled(),
-            var domain = UserDefaults.standard.persistentDomain(forName: wakaTimeAppBundleID),
-            var monitored = domain[wakaTimeMonitoredKey] as? [String]
+        guard var domain = UserDefaults.standard.persistentDomain(forName: wakaTimeAppBundleID),
+            var monitored = domain[wakaTimeMonitoredKey] as? [String],
+            monitored.contains(XcodeObserver.xcodeBundleID)
         else { return }
         monitored.removeAll { $0 == XcodeObserver.xcodeBundleID }
         domain[wakaTimeMonitoredKey] = monitored
         UserDefaults.standard.setPersistentDomain(domain, forName: wakaTimeAppBundleID)
         report("Disabled WakaTime.app's Xcode tracking (it would double-count every heartbeat).")
         report("Its other monitored apps are untouched.")
-        if notifyUser, Date().timeIntervalSince(lastTrackerNotification) > 600 {
-            lastTrackerNotification = Date()
-            // UNUserNotificationCenter needs an app bundle and this agent
-            // has none; osascript posts banners from any process.
-            shell(
-                "/usr/bin/osascript",
-                [
-                    "-e",
-                    "display notification \"WakaTime.app tried to track Xcode again - disabled it to prevent double-counting.\" with title \"Hackatime\"",
-                ])
+        if notifyUser {
+            postBanner("WakaTime.app tried to track Xcode again - disabled it to prevent double-counting.")
         }
         // a running WakaTime.app may cache the list; bounce it invisibly
-        // (open -g launches in the background, no windows).
+        // (open -g launches in the background, no windows). the wait blocks,
+        // so the agent (notifyUser) does it off the main run loop; the
+        // one-shot install CLI needs it synchronous or the process exits
+        // before the relaunch.
         guard let app = NSRunningApplication.runningApplications(withBundleIdentifier: wakaTimeAppBundleID).first
         else { return }
-        app.terminate()
-        for _ in 0..<15 where !app.isTerminated { Thread.sleep(forTimeInterval: 0.2) }
-        shell("/usr/bin/open", ["-g", "-b", wakaTimeAppBundleID])
+        let bounce = {
+            app.terminate()
+            for _ in 0..<15 where !app.isTerminated { Thread.sleep(forTimeInterval: 0.2) }
+            shell("/usr/bin/open", ["-g", "-b", wakaTimeAppBundleID])
+        }
+        if notifyUser {
+            DispatchQueue.global(qos: .utility).async(execute: bounce)
+        } else {
+            bounce()
+        }
     }
 
     /// WakaTime, Inc.'s Apple Developer team, pinned so a compromised
@@ -390,20 +464,6 @@ enum Installer {
         }
     }
 
-    private static func checkAPIKey() -> Bool {
-        let hasKey = apiKeyConfigured()
-        if !hasKey {
-            print("")
-            print("⚠️  No api_key found in ~/.wakatime.cfg.")
-            print("   Hackatime: follow https://hackatime.hackclub.com - its setup script")
-            print("   writes ~/.wakatime.cfg for you. WakaTime: put your key from")
-            print("   https://wakatime.com/settings/api-key in ~/.wakatime.cfg:")
-            print("     [settings]")
-            print("     api_key = YOUR-KEY")
-        }
-        return hasKey
-    }
-
     static func uninstall() -> Int32 {
         // bootout of an agent that is not loaded fails; that is fine, since
         // the goal state (not running) is already true. but bootout can also
@@ -437,11 +497,7 @@ enum Installer {
         // state. never report any other removal failure as success.
         let fm = FileManager.default
         var failures: [String] = []
-        for path in [
-            plistPath, installedBinary, logPath,
-            Onboarding.trustedMarker, Onboarding.dismissedMarker,
-            Onboarding.pidFile, axPromptedMarker, regrantMarker, grantPendingMarker,
-        ]
+        for path in [plistPath, installedBinary, logPath] + allStateFiles
         where fm.fileExists(atPath: path) {
             do { try fm.removeItem(atPath: path) } catch {
                 failures.append("\(path): \(error.localizedDescription)")
@@ -457,30 +513,20 @@ enum Installer {
     }
 
     static func status() -> Int32 {
-        let (status, out) = shell("/bin/launchctl", ["print", "gui/\(getuid())/\(label)"])
-        let loaded = status == 0
-        if loaded {
-            let state =
-                out.split(separator: "\n").first { $0.contains("state =") }?.trimmingCharacters(in: .whitespaces)
-                ?? "state unknown"
-            print("launchd agent: loaded (\(state))")
+        let job = launchdJob()
+        if job.loaded {
+            print("launchd agent: loaded (\(job.field("state =") ?? "state unknown"))")
         } else {
             print("launchd agent: not loaded")
         }
         // prefer the unified log (the system of record); `log show` can fail
-        // for non-admin accounts, so the launchd-captured file below remains
-        // the fallback.
-        let (logStatus, logOut) = shell(
-            "/usr/bin/log",
-            [
-                "show", "--last", "30m",
-                "--predicate", "subsystem == \"\(label)\"", "--style", "compact",
-            ])
-        let entries = logOut.split(separator: "\n").dropFirst()
-        if logStatus == 0, !entries.isEmpty {
+        // for non-admin accounts, so the crash-trace file below remains the
+        // fallback.
+        let entries = unifiedLogLines(last: "30m")
+        if !entries.isEmpty {
             print("--- recent activity (unified log, last 30m) ---")
             entries.suffix(10).forEach { print($0) }
-            return loaded ? 0 : 1
+            return job.loaded ? 0 : 1
         }
         // tail without materializing the whole log. decode lossily (the
         // seek can land mid-scalar) and drop the first (possibly partial)
@@ -494,12 +540,12 @@ enum Installer {
                 .split(separator: "\n")[...]
             if start > 0 { lines = lines.dropFirst() }
             if !lines.isEmpty {
-                print("--- last log lines ---")
+                print("--- stderr log (crash traces) ---")
                 lines.suffix(10).forEach { print($0) }
             }
             try? fh.close()
         }
-        return loaded ? 0 : 1
+        return job.loaded ? 0 : 1
     }
 
     @discardableResult

@@ -16,87 +16,66 @@ enum Doctor {
             }
         }
 
-        // agent registered and running
-        let (loadStatus, loadOut) = Installer.shell(
-            "/bin/launchctl", ["print", "gui/\(getuid())/\(Installer.label)"])
-        let agentPID = loadOut.split(separator: "\n")
-            .first { $0.contains("pid = ") }?.trimmingCharacters(in: .whitespaces)
+        let job = Installer.launchdJob()
         check(
-            loadStatus == 0, "agent",
-            loadStatus == 0 ? "loaded (\(agentPID ?? "pid unknown"))" : "not loaded",
+            job.loaded, "agent",
+            job.loaded ? "loaded (\(job.field("pid = ") ?? "pid unknown"))" : "not loaded",
             fix: "run 'xcode-hackatime install'")
 
         // agent trust, read from its own recent unified-log lines. a
         // terminal-spawned check-trust is attributed to the terminal by TCC
         // and proves nothing about the agent.
-        let (_, logOut) = Installer.shell(
-            "/usr/bin/log",
-            [
-                "show", "--last", "2h", "--style", "compact",
-                "--predicate", "subsystem == \"\(Installer.label)\"",
-            ])
-        let logLines = logOut.split(separator: "\n")
+        let logLines = Installer.unifiedLogLines(last: "2h")
         let lastWaiting = logLines.lastIndex { $0.contains("waiting for Accessibility") }
         let lastGranted = logLines.lastIndex { $0.contains("Accessibility permission OK") }
         let trusted: Bool
         let trustDetail: String
-        switch (lastWaiting, lastGranted) {
-        case let (waiting?, granted?):
-            trusted = granted > waiting
+        if lastGranted != nil || lastWaiting != nil {
+            trusted = (lastGranted ?? -1) > (lastWaiting ?? -1)
             trustDetail = trusted ? "granted" : "the agent is waiting for the toggle"
-        case (nil, .some):
-            trusted = true
-            trustDetail = "granted"
-        case (.some, nil):
-            trusted = false
-            trustDetail = "the agent is waiting for the toggle"
-        case (nil, nil):
-            trusted = false
-            trustDetail = "no agent log activity in the last 2h"
+        } else {
+            // a healthy agent can be silent for hours; fall back to the
+            // grant-cycle markers (grant-pending is touched while waiting
+            // and consumed on every trusted start).
+            let waitingNow = FileManager.default.fileExists(atPath: Onboarding.grantPendingMarker)
+            let everTrusted = FileManager.default.fileExists(atPath: Onboarding.trustedMarker)
+            trusted = !waitingNow && everTrusted
+            trustDetail =
+                waitingNow
+                ? "the agent is waiting for the toggle"
+                : (everTrusted ? "granted (agent quiet; inferred from state markers)" : "never granted")
         }
         check(
             trusted, "accessibility", trustDetail,
             fix: "System Settings → Privacy & Security → Accessibility → toggle xcode-hackatime off, then on")
 
-        // wakatime-cli present
         let cliOK = FileManager.default.isExecutableFile(atPath: Installer.wakatimeCLIPath)
         check(
             cliOK, "wakatime-cli", cliOK ? Installer.wakatimeCLIPath : "missing",
             fix: "re-run 'xcode-hackatime install' to download and verify it")
 
-        // api key and network, proven end to end by the CLI itself
         if cliOK {
-            let (todayStatus, todayOut) = Installer.shell(Installer.wakatimeCLIPath, ["--today"])
-            let today = todayOut.trimmingCharacters(in: .whitespacesAndNewlines)
+            let today = Installer.todayCheck()
             check(
-                todayStatus == 0, "api",
-                todayStatus == 0
-                    ? "connected (\(today) tracked today)"
-                    : "wakatime-cli --today failed (exit \(todayStatus))",
-                fix:
-                    "check api_key in ~/.wakatime.cfg - https://hackatime.hackclub.com/my/wakatime_setup writes it for you"
-            )
+                today.ok, "api", today.detail,
+                fix: "check api_key in ~/.wakatime.cfg - \(Installer.setupURL) writes it for you")
         }
 
-        // xcode
         let xcode = XcodeObserver.runningXcode()
         check(
             xcode != nil, "Xcode",
             xcode.map { "running (pid \($0.processIdentifier))" } ?? "not running",
             fix: "open Xcode; the agent attaches automatically")
 
-        // recent heartbeats (only expected while Xcode is running)
+        // informational, never a failure: the idle gating means silence
+        // while the user is away is designed behavior, even with Xcode open.
         let lastBeat = logLines.last { $0.contains("heartbeat:") }
         let beatDetail = lastBeat.flatMap { line -> String? in
             guard let start = line.range(of: "heartbeat:")?.upperBound else { return nil }
             return "last:" + line[start...]
         }
-        check(
-            lastBeat != nil || xcode == nil, "heartbeats",
-            beatDetail ?? "none in the last 2h",
-            fix: "type in an Xcode source editor, then re-run doctor")
+        check(true, "heartbeats", beatDetail ?? "none in the last 2h (normal while idle)")
 
-        // competing tracker
         let competing = Installer.competingXcodeTrackerEnabled()
         check(
             !competing, "WakaTime.app",

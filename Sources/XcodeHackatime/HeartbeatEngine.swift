@@ -70,7 +70,7 @@ final class HeartbeatEngine {
             guard p.terminationStatus != 0 else { return }
             DispatchQueue.main.async {
                 log(
-                    "wakatime-cli exited with status \(p.terminationStatus) - check ~/.wakatime/wakatime.log and the api_key in ~/.wakatime.cfg"
+                    "warning: wakatime-cli exited with status \(p.terminationStatus) - check ~/.wakatime/wakatime.log and the api_key in ~/.wakatime.cfg"
                 )
             }
         }
