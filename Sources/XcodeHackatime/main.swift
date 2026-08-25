@@ -2,49 +2,38 @@ import AppKit
 import ApplicationServices
 import os
 
-/// system of record for diagnostics: the unified log (the OS handles
-/// rotation, retention and access control; stream it in Console.app or with
-/// `log show --predicate 'subsystem == "com.hackclub.hackatime..."'`).
-/// paths are the diagnostic payload, so entries log as .public. the store
-/// is only readable on this Mac, unlike a world-readable file.
+// unified log entries are .public: paths are the diagnostic payload, and the
+// store is only readable on this Mac, unlike a world-readable file
 private let osLogger = Logger(subsystem: Installer.label, category: "agent")
 
 private let stampFormatter = ISO8601DateFormatter()
 
 func logLine(_ message: String) {
-    // agent log messages that report problems start with "warning:"; route
-    // those to the error level so Console and log-show predicates can
-    // filter them from routine chatter. (installer output uses print and
-    // does not pass through here.)
+    // "warning:" prefixed messages go to the error level so log-show
+    // predicates can filter them from routine chatter
     if message.hasPrefix("warning:") {
         osLogger.error("\(message, privacy: .public)")
     } else {
         osLogger.notice("\(message, privacy: .public)")
     }
-    // also print, for live output in foreground runs. under launchd stdout
-    // is discarded; the unified log is the record, and the log file only
-    // captures stderr (crash traces).
+    // launchd discards stdout; this print only serves foreground runs
     print("[\(stampFormatter.string(from: Date()))] \(message)")
     fflush(stdout)
 }
 
-/// logd buffers asynchronously and an instant exit can lose the final
-/// entry; the unified log is the only record now, so give it a moment.
+// logd buffers asynchronously; an instant exit can lose the final entry
 func logAndExit(_ message: String) -> Never {
     logLine(message)
     Thread.sleep(forTimeInterval: 0.3)
     exit(0)
 }
 
-/// TCC state read by a brand-new process, immune to the per-process cache.
-/// nil means the check itself could not run (e.g. our binary briefly missing
-/// during a reinstall, transient fork pressure). callers must not confuse
-/// that with a definitive "not trusted".
+/// TCC state read by a brand-new process, immune to the per-process cache;
+/// nil means the check itself could not run, not "not trusted"
 func freshTrustCheck() -> Bool? {
     guard let process = Installer.spawnSelf(["check-trust"], discardOutput: true) else { return nil }
     process.waitUntilExit()
-    // only a normal exit with the defined statuses is an answer. a crash or
-    // a signal is a failed check, not evidence of revocation.
+    // a crash or a signal is a failed check, not evidence of revocation
     guard process.terminationReason == .exit else { return nil }
     switch process.terminationStatus {
     case 0: return true
@@ -53,44 +42,35 @@ func freshTrustCheck() -> Bool? {
     }
 }
 
-/// macOS posts this whenever the Accessibility list changes. it carries no
-/// payload and is not API contract, so it only ever *triggers* the supported
-/// fresh-process check. fallback timers cover missed notifications.
+/// posted by macOS on any Accessibility list change. undocumented and
+/// payload-free, so it only ever triggers the supported fresh-process check;
+/// fallback timers cover missed notifications
 let axChangedNotification = Notification.Name("com.apple.accessibility.api")
 
 func runAgent() -> Never {
     // launchd recreates the log with default umask; it records every file
-    // path the user works on, so keep it private to this account.
+    // path the user works on
     try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: Installer.logPath)
     Installer.trimLogIfNeeded()
     if !AXIsProcessTrusted() {
-        // show the system permission prompt only once per install: it is the
-        // only way to get registered in the Accessibility list at all, but we
-        // exit/relaunch continuously while waiting (to read fresh TCC state),
-        // and a re-prompt on every relaunch nags the user with popups. after
-        // the first prompt the row exists in System Settings, and the
-        // onboarding window carries the instructions.
+        // prompt once per install: the untrusted agent exits and relaunches
+        // continuously to read fresh TCC state, and re-prompting every
+        // relaunch nags with popups. after the first prompt the row exists
+        // in System Settings and the onboarding window carries instructions
         let promptMarker = Installer.axPromptedMarker
         if !FileManager.default.fileExists(atPath: promptMarker) {
             Installer.touchMarker(promptMarker)
             let options = ["AXTrustedCheckOptionPrompt": true] as CFDictionary
             _ = AXIsProcessTrustedWithOptions(options)
         }
-        logLine("waiting for Accessibility permission…")
-        // a trusted start that finds this marker knows onboarding just
-        // completed and posts the one-time "tracking started" banner.
+        logLine("waiting for Accessibility permission...")
+        // a trusted start that finds this marker posts the one-time
+        // "tracking started" banner
         Installer.touchMarker(Onboarding.grantPendingMarker)
-        // a TCC grant does not propagate to an already-running process (the
-        // AX framework caches the denial), but a *fresh* process always
-        // reads fresh TCC state. so the checks below spawn ourselves as a
-        // short-lived `check-trust` child, and the moment one reports
-        // trusted we exit so launchd relaunches us trusted (no respawn
-        // throttle once we have been alive >10s). the checks are
-        // event-driven: macOS posts axChangedNotification whenever the
-        // Accessibility list changes, so we notice the grant
-        // near-instantly; a slow timer covers missed notifications. while
-        // waiting, if Xcode is open, show the onboarding window (a separate
-        // process, so it survives our relaunch cycle without flicker).
+        // a TCC grant never propagates to a running process (the AX
+        // framework caches the denial), but a fresh process reads fresh
+        // state; exit on the first trusted report so launchd relaunches us
+        // trusted
         let checkTrustAndMaybeRelaunch = {
             if freshTrustCheck() == true {
                 logAndExit("permission granted; relaunching to pick it up")
@@ -108,8 +88,6 @@ func runAgent() -> Never {
         }
         Timer.scheduledTimer(withTimeInterval: 10, repeats: true) { _ in tick() }
         tick()
-        // exit periodically regardless, so launchd relaunches us with a
-        // clean slate.
         Timer.scheduledTimer(withTimeInterval: 60, repeats: false) { _ in
             logAndExit("still not trusted; exiting so launchd can relaunch with fresh TCC state")
         }
@@ -117,20 +95,17 @@ func runAgent() -> Never {
         exit(0)
     }
     logLine("Accessibility permission OK")
-    // close the onboarding loop: transitioning from waiting to trusted
-    // deserves a visible win-state, not silence. once per grant cycle.
     if Installer.consumeMarker(Onboarding.grantPendingMarker) {
         Installer.postBanner("You're all set - Xcode time counts from now.")
     }
     Installer.consumeMarker(Onboarding.regrantMarker)
-    // tells any onboarding window that tracking has started, so it dismisses.
+    // tells any onboarding window that tracking has started, so it dismisses
     Installer.touchMarker(Onboarding.trustedMarker)
-    // a past "user closed the onboarding window" no longer applies once
-    // trusted; clear it so onboarding returns if permission is ever revoked.
+    // a past window dismissal no longer applies once trusted; clear it so
+    // onboarding returns if permission is ever revoked
     try? FileManager.default.removeItem(atPath: Onboarding.dismissedMarker)
 
-    // no eager disable call: the watcher fires once at attach, which runs
-    // the same re-check.
+    // no eager disable call: the watcher fires once at attach
     Installer.startCompetingTrackerWatcher(report: logLine)
 
     let engine = HeartbeatEngine(log: logLine)
@@ -147,9 +122,8 @@ func runAgent() -> Never {
     observer.onWritePoll = { state, resolvePosition in
         engine.pollDiskWrites(state, resolvePosition: resolvePosition)
     }
-    // full metadata resolution chain lives here, not in the engine: the
     // attached instance, then any running Xcode, then Launch Services'
-    // default (covers Xcode-beta.app and relocated installs).
+    // default (covers Xcode-beta.app and relocated installs)
     engine.attachedXcodeBundleURL = {
         observer.attachedXcodeBundleURL
             ?? XcodeObserver.runningXcode()?.bundleURL
@@ -157,11 +131,10 @@ func runAgent() -> Never {
     }
     observer.startWatchingWorkspace()
 
-    // notice revocation: our own AX state is cached, so ask a fresh process.
-    // event-driven via axChangedNotification with a slow fallback timer.
-    // this runs off the main queue; waitUntilExit would otherwise stall AX
-    // event delivery for the child's whole lifetime on every check. only a
-    // definitive "not trusted" restarts; we retry a failed check (nil).
+    // revocation is invisible to our own cached AX state, so ask a fresh
+    // process. off the main queue: waitUntilExit would stall AX event
+    // delivery for the child's whole lifetime. only a definitive "not
+    // trusted" restarts; a failed check (nil) is retried
     let revocationCheck = {
         DispatchQueue.global(qos: .utility).async {
             guard freshTrustCheck() == false else { return }
@@ -173,20 +146,17 @@ func runAgent() -> Never {
     DistributedNotificationCenter.default().addObserver(
         forName: axChangedNotification, object: nil, queue: .main
     ) { _ in revocationCheck() }
-    // slow maintenance tick with one job: TCC revocation when the
-    // undocumented axChangedNotification fails to arrive. five-minute
-    // worst-case detection is acceptable for a fallback path. (log trimming
-    // is startup-only; the file holds crash stderr and a crash loop trims
-    // itself via constant relaunches.)
+    // fallback for a missed axChangedNotification; five-minute worst-case
+    // detection is acceptable
     Timer.scheduledTimer(withTimeInterval: 300, repeats: true) { _ in
         revocationCheck()
     }
 
     logLine("xcode-hackatime \(appVersion) running")
     // nothing else holds engine/observer strongly (the AX callback refcon is
-    // deliberately unretained, timers capture weak), and ARC frees locals at
-    // last use, not scope end. without this, an optimized build may dealloc
-    // both right here and leave the AX callback with a dangling refcon.
+    // deliberately unretained, timers capture weak) and ARC frees locals at
+    // last use, so an optimized build may dealloc both right here and leave
+    // the AX callback with a dangling refcon
     withExtendedLifetime((engine, observer)) {
         RunLoop.main.run()
     }

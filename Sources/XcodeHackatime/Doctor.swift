@@ -2,9 +2,7 @@ import AppKit
 import Foundation
 
 /// `xcode-hackatime doctor` checks every link in the tracking chain and
-/// prints a fix for each broken one. assembled from checks that already
-/// exist elsewhere; made to be the first thing pasted into a support
-/// thread.
+/// prints a fix for each broken one; made to be pasted into a support thread
 enum Doctor {
     static func run() -> Int32 {
         var failures = 0
@@ -22,9 +20,9 @@ enum Doctor {
             job.loaded ? "loaded (\(job.field("pid = ") ?? "pid unknown"))" : "not loaded",
             fix: "run 'xcode-hackatime install'")
 
-        // agent trust, read from its own recent unified-log lines. a
-        // terminal-spawned check-trust is attributed to the terminal by TCC
-        // and proves nothing about the agent.
+        // trust is read from the agent's own log lines: a terminal-spawned
+        // check-trust is TCC-attributed to the terminal and proves nothing
+        // about the agent
         let logLines = Installer.unifiedLogLines(last: "2h")
         let lastWaiting = logLines.lastIndex { $0.contains("waiting for Accessibility") }
         let lastGranted = logLines.lastIndex { $0.contains("Accessibility permission OK") }
@@ -36,7 +34,7 @@ enum Doctor {
         } else {
             // a healthy agent can be silent for hours; fall back to the
             // grant-cycle markers (grant-pending is touched while waiting
-            // and consumed on every trusted start).
+            // and consumed on every trusted start)
             let waitingNow = FileManager.default.fileExists(atPath: Onboarding.grantPendingMarker)
             let everTrusted = FileManager.default.fileExists(atPath: Onboarding.trustedMarker)
             trusted = !waitingNow && everTrusted
@@ -47,7 +45,7 @@ enum Doctor {
         }
         check(
             trusted, "accessibility", trustDetail,
-            fix: "System Settings → Privacy & Security → Accessibility → toggle xcode-hackatime off, then on")
+            fix: "System Settings -> Privacy & Security -> Accessibility -> toggle xcode-hackatime off, then on")
 
         let cliOK = FileManager.default.isExecutableFile(atPath: Installer.wakatimeCLIPath)
         check(
@@ -67,8 +65,8 @@ enum Doctor {
             xcode.map { "running (pid \($0.processIdentifier))" } ?? "not running",
             fix: "open Xcode; the agent attaches automatically")
 
-        // informational, never a failure: the idle gating means silence
-        // while the user is away is designed behavior, even with Xcode open.
+        // informational, never a failure: idle gating means silence while
+        // the user is away is designed behavior, even with Xcode open
         let lastBeat = logLines.last { $0.contains("heartbeat:") }
         let beatDetail = lastBeat.flatMap { line -> String? in
             guard let start = line.range(of: "heartbeat:")?.upperBound else { return nil }

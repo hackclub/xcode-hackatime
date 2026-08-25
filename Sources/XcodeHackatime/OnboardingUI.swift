@@ -1,9 +1,8 @@
 import AppKit
 
-/// shared builder for the small onboarding-style windows (Accessibility
-/// walkthrough, API-key setup, success states). every window is an
+/// shared builder for the onboarding-style windows. every window is an
 /// invitation, never a gate: all are closable, and closing one never blocks
-/// or delays tracking.
+/// or delays tracking
 enum OnboardingUI {
     struct Content {
         var icon: String
@@ -32,7 +31,7 @@ enum OnboardingUI {
         return window
     }
 
-    /// replace a window's content in place (used to flip to success states).
+    /// replace a window's content in place (used to flip to success states)
     static func apply(_ content: Content, to window: NSWindow) {
         let stack = buildStack(content)
         let container = NSView()
@@ -114,8 +113,8 @@ enum OnboardingUI {
             row.orientation = .horizontal
             row.spacing = 10
             row.alignment = .centerY
-            // a fixed circle container with the digit centered inside it.
-            // sizing the text field itself leaves the digit top-aligned.
+            // fixed circle container; sizing the text field itself leaves
+            // the digit top-aligned
             let badge = NSView()
             badge.wantsLayer = true
             badge.layer?.backgroundColor = NSColor.controlAccentColor.cgColor
@@ -155,10 +154,9 @@ enum OnboardingUI {
         return card
     }
 
-    /// the shared window run-loop: present, poll, flip to a green win-state
-    /// when complete, dwell 2.5s, exit. `onDismiss(byUser:)` must not
-    /// return; it receives true only when the user closed the window before
-    /// completion. `tick` runs each poll for extra caller rules.
+    /// present, poll, flip to a green win-state when complete, dwell 2.5s,
+    /// exit. `onDismiss(byUser:)` must not return; it receives true only
+    /// when the user closed the window before completion
     static func runWindow(
         _ content: Content,
         pollEvery: TimeInterval,

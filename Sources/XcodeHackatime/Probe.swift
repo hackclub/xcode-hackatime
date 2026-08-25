@@ -2,7 +2,7 @@ import AppKit
 import ApplicationServices
 
 /// `xcode-hackatime probe` dumps what Xcode currently exposes through
-/// Accessibility. for development and bug reports.
+/// Accessibility, for development and bug reports
 enum Probe {
     static func run() -> Int32 {
         guard AXIsProcessTrusted() else {
@@ -49,9 +49,9 @@ enum Probe {
         return 0
     }
 
-    /// attributes that carry document content. probe output goes into bug
-    /// reports, so print their size, never their text. a selection can be
-    /// anything, including credentials.
+    /// probe output goes into bug reports, so attributes carrying document
+    /// content print their size, never their text; a selection can be
+    /// anything, including credentials
     private static let contentAttributes: Set<String> = [
         kAXValueAttribute as String,
         kAXSelectedTextAttribute as String,
@@ -92,8 +92,8 @@ enum Probe {
 
     private static func describe(_ value: CFTypeRef?) -> String {
         guard let value else { return "<nil>" }
-        // backstop for content that sneaks in through unlisted attributes:
-        // metadata strings (roles, paths, titles) are short.
+        // backstop for content that sneaks in through unlisted attributes;
+        // metadata strings (roles, paths, titles) are short
         if let s = value as? String { return s.count > 200 ? "<\(s.count) chars>" : s }
         if let n = value as? NSNumber { return n.stringValue }
         if CFGetTypeID(value) == AXValueGetTypeID() {

@@ -2,10 +2,8 @@ import XCTest
 
 @testable import xcode_hackatime
 
-/// policy tests for HeartbeatEngine.consider: throttling, staleness, write
-/// detection and classification, delta computation and commit-on-success.
-/// the engine's test seams inject the clock and the CLI launch;
-/// files are real temp files so mtime/line-count reads exercise real I/O.
+/// seams inject the clock and the CLI launch; files are real temp files so
+/// mtime and line-count reads exercise real I/O
 final class HeartbeatEngineTests: XCTestCase {
     private var engine: HeartbeatEngine!
     private var sentArgs: [[String]] = []
@@ -139,14 +137,14 @@ final class HeartbeatEngineTests: XCTestCase {
         let file = makeFile("a.swift", lines: 3, mtime: clock)
         consider(file)
         advance(300)
-        // changed on disk minutes ago, first noticed now: git pull, not ⌘S.
+        // changed on disk minutes ago, first noticed now: git pull, not cmd-S
         rewrite(file, lines: 100, mtime: clock.addingTimeInterval(-200))
         consider(file)
-        // a stale heartbeat still goes out (>120s), but without write credit.
+        // a stale heartbeat still goes out (>120s), but without write credit
         XCTAssertEqual(sentArgs.count, 2)
         XCTAssertFalse(lastSend!.contains("--write"))
         XCTAssertNil(value(of: "--human-line-changes", in: lastSend!))
-        // and the foreign diff never surfaces as a later delta either.
+        // the foreign diff must not surface as a later delta either
         advance(30)
         rewrite(file, lines: 101, mtime: clock.addingTimeInterval(-1))
         consider(file)
@@ -159,7 +157,7 @@ final class HeartbeatEngineTests: XCTestCase {
         let file = makeFile("a.swift", lines: 3, mtime: clock)
         consider(file)
         advance(600)  // user walks away
-        rewrite(file, lines: 4, mtime: clock.addingTimeInterval(-2))  // ⌘S on return
+        rewrite(file, lines: 4, mtime: clock.addingTimeInterval(-2))  // cmd-S on return
         consider(file)
         XCTAssertTrue(lastSend!.contains("--write"))
     }
@@ -228,7 +226,7 @@ final class HeartbeatEngineTests: XCTestCase {
         consider(file)  // stale send keeps the user's per-file activity fresh
         advance(30)
         // a tool replaced the file and preserved an old timestamp: newer than
-        // the baseline, but far from any user activity in either direction.
+        // the baseline, but far from any user activity in either direction
         rewrite(file, lines: 100, mtime: clock.addingTimeInterval(-180))
         consider(file)
         XCTAssertEqual(sentArgs.count, 2, "historical mtime must be swallowed as external")
@@ -250,7 +248,7 @@ final class HeartbeatEngineTests: XCTestCase {
         advance(2)
         consider(a)  // user works in a
         advance(120)
-        // b changed on disk mid-way: during a's activity, but not b's.
+        // b changed on disk mid-way: during a's activity, but not b's
         rewrite(b, lines: 100, mtime: clock.addingTimeInterval(-30))
         poll(b)
         XCTAssertEqual(sentArgs.count, 2, "activity in a must not credit b's external change")
@@ -273,7 +271,7 @@ final class HeartbeatEngineTests: XCTestCase {
         let file = makeFile("a.swift", lines: 3, mtime: clock.addingTimeInterval(-1))
         consider(file)
         advance(30)
-        // checkout/restore: 100-line content stamped with an OLD mtime.
+        // checkout/restore: 100-line content stamped with an old mtime
         rewrite(file, lines: 100, mtime: clock.addingTimeInterval(-500))
         consider(file)
         XCTAssertEqual(sentArgs.count, 1, "backward mtime is external, not a send trigger")
@@ -386,8 +384,8 @@ final class HeartbeatEngineTests: XCTestCase {
         let file = makeFile("a.swift", lines: 3, mtime: clock)
         consider(file)  // user activity establishes baselines
         advance(30)
-        // ⌘S landed 25s ago, just after the user's last event. no AX event
-        // followed it; only the timer poll notices.
+        // cmd-S landed 25s ago, just after the user's last event; no AX
+        // event followed it, so only the timer poll notices
         rewrite(file, lines: 8, mtime: clock.addingTimeInterval(-25))
         poll(file)
         XCTAssertEqual(sentArgs.count, 2)
@@ -407,7 +405,7 @@ final class HeartbeatEngineTests: XCTestCase {
         let file = makeFile("a.swift", lines: 3, mtime: clock)
         consider(file)
         advance(300)
-        // changed on disk 200s after the user's last activity: git pull.
+        // changed on disk 200s after the user's last activity: git pull
         rewrite(file, lines: 100, mtime: clock.addingTimeInterval(-100))
         poll(file)
         XCTAssertEqual(sentArgs.count, 1, "external change on a quiet tick must not send")
@@ -421,7 +419,7 @@ final class HeartbeatEngineTests: XCTestCase {
         launchSucceeds = false
         consider(file)  // write detected, launch fails
         // the user keeps editing; retries keep failing far past saveSlack,
-        // which would drift the unsent write into the external band.
+        // which would drift the unsent write into the external band
         for _ in 0..<10 {
             advance(10)
             consider(file)
