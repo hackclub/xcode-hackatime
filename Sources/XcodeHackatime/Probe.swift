@@ -49,9 +49,6 @@ enum Probe {
         return 0
     }
 
-    /// probe output goes into bug reports, so attributes carrying document
-    /// content print their size, never their text; a selection can be
-    /// anything, including credentials
     private static let contentAttributes: Set<String> = [
         kAXValueAttribute as String,
         kAXSelectedTextAttribute as String,

@@ -1,8 +1,6 @@
 import AppKit
 
-/// shared builder for the onboarding-style windows. every window is an
-/// invitation, never a gate: all are closable, and closing one never blocks
-/// or delays tracking
+/// shared builder for the onboarding-style windows.
 enum OnboardingUI {
     struct Content {
         var icon: String
