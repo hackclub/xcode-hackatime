@@ -290,7 +290,7 @@ enum Installer {
         installNotifierApp()
         Notifier.primeDelivery(
             message: "Notifications are set up - Hackatime posts important tracking events here.",
-            deliver: deliverBanner)
+            deliver: { deliverBanner($0) })
         return 0
     }
 
