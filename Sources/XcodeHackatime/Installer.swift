@@ -23,13 +23,15 @@ enum Installer {
         [
             axPromptedMarker, Onboarding.trustedMarker, Onboarding.dismissedMarker,
             Onboarding.regrantMarker, Onboarding.grantPendingMarker,
-            Onboarding.pidFile, KeySetup.pidFile,
+            Onboarding.pidFile, KeySetup.pidFile, notifierApp,
         ]
     }
 
     /// argv[0] is whatever the user typed at the shell (a bare name when
     /// found via $PATH), so it is never usable as a filesystem path
     static let selfExecutablePath = Bundle.main.executablePath ?? CommandLine.arguments[0]
+    /// symlink-resolved, so copies land the real binary and not a link
+    static let resolvedSelfPath = URL(fileURLWithPath: selfExecutablePath).resolvingSymlinksInPath().path
 
     /// returns nil if the spawn failed (e.g. the binary is briefly missing
     /// during a reinstall)
@@ -78,7 +80,7 @@ enum Installer {
     /// helper bundle assembled by install; gives banners a real Hackatime
     /// identity (name, icon, Focus-manageable)
     static var notifierApp: String { installDir + "/Hackatime.app" }
-    static var notifierBinary: String { notifierApp + "/Contents/MacOS/hackatime-notifier" }
+    static var notifierBinary: String { notifierApp + "/Contents/MacOS/" + Notifier.executableName }
 
     /// best-effort banner: no helper means no banner, never a fallback under
     /// another app's identity. throttled per message so a grant banner
@@ -86,11 +88,21 @@ enum Installer {
     private static var lastBannerAt: [String: Date] = [:]
     static func postBanner(_ body: String) {
         guard Date().timeIntervalSince(lastBannerAt[body] ?? .distantPast) > 600 else { return }
-        lastBannerAt[body] = Date()
-        guard FileManager.default.isExecutableFile(atPath: notifierBinary) else { return }
-        DispatchQueue.global(qos: .utility).async {
-            shell(notifierBinary, ["notify", body])
-        }
+        if deliverBanner(body) { lastBannerAt[body] = Date() }
+    }
+
+    /// the single chokepoint for helper invocation. fire and forget: the
+    /// helper delays its own exit 0.7s for the notification daemon, and no
+    /// caller should block on that
+    @discardableResult
+    static func deliverBanner(_ message: String) -> Bool {
+        guard FileManager.default.isExecutableFile(atPath: notifierBinary) else { return false }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: notifierBinary)
+        process.arguments = ["notify", message]
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        return (try? process.run()) != nil
     }
 
     /// assemble ~/.wakatime/Hackatime.app around a copy of our binary. the
@@ -103,21 +115,19 @@ enum Installer {
         do {
             try fm.createDirectory(atPath: macos, withIntermediateDirectories: true)
             try fm.createDirectory(atPath: resources, withIntermediateDirectories: true)
-            let info: [String: Any] = [
-                "CFBundleIdentifier": Notifier.bundleID,
-                "CFBundleName": "Hackatime",
-                "CFBundleDisplayName": "Hackatime",
-                "CFBundleExecutable": "hackatime-notifier",
-                "CFBundleIconFile": "Hackatime",
-                "CFBundlePackageType": "APPL",
-                "CFBundleShortVersionString": appVersion,
-                "LSUIElement": true,
-            ]
-            let data = try PropertyListSerialization.data(fromPropertyList: info, format: .xml, options: 0)
-            try data.write(to: URL(fileURLWithPath: contents + "/Info.plist"), options: .atomic)
+            try writePlist(
+                [
+                    "CFBundleIdentifier": Notifier.bundleID,
+                    "CFBundleName": "Hackatime",
+                    "CFBundleDisplayName": "Hackatime",
+                    "CFBundleExecutable": Notifier.executableName,
+                    "CFBundleIconFile": "Hackatime",
+                    "CFBundlePackageType": "APPL",
+                    "CFBundleShortVersionString": appVersion,
+                    "LSUIElement": true,
+                ], to: contents + "/Info.plist")
             try? fm.removeItem(atPath: notifierBinary)
-            let source = URL(fileURLWithPath: selfExecutablePath).resolvingSymlinksInPath().path
-            try fm.copyItem(atPath: source, toPath: notifierBinary)
+            try fm.copyItem(atPath: resolvedSelfPath, toPath: notifierBinary)
             let icon = resources + "/Hackatime.icns"
             if !fm.fileExists(atPath: icon) { Notifier.writeIcon(to: icon) }
             // ad-hoc signature suffices for notification delivery, verified live
@@ -134,28 +144,9 @@ enum Installer {
         }
     }
 
-    /// the first delivery registers the helper with Notification Center in
-    /// a suppressed pending state, so: deliver once to register, approve the
-    /// fresh entry, deliver again so the install banner is actually seen.
-    /// install-only; the agent never re-approves behind a user who turned
-    /// notifications off in System Settings
-    static func primeNotifier(_ message: String) {
-        guard FileManager.default.isExecutableFile(atPath: notifierBinary) else { return }
-        shell(notifierBinary, ["notify", message])
-        // the ncprefs entry appears asynchronously after the first delivery
-        for _ in 0..<10 {
-            switch Notifier.approveDelivery() {
-            case .alreadyApproved:
-                return  // the first delivery was already visible
-            case .approved:
-                // give the bounced usernoted a moment to come back
-                Thread.sleep(forTimeInterval: 1)
-                shell(notifierBinary, ["notify", message])
-                return
-            case .notRegistered:
-                Thread.sleep(forTimeInterval: 0.3)
-            }
-        }
+    static func writePlist(_ dict: [String: Any], to path: String) throws {
+        let data = try PropertyListSerialization.data(fromPropertyList: dict, format: .xml, options: 0)
+        try data.write(to: URL(fileURLWithPath: path), options: .atomic)
     }
 
     /// proves the whole auth path (key, network, backend) via the CLI
@@ -201,7 +192,7 @@ enum Installer {
 
     static func install() -> Int32 {
         let fm = FileManager.default
-        let selfPath = URL(fileURLWithPath: selfExecutablePath).resolvingSymlinksInPath().path
+        let selfPath = resolvedSelfPath
 
         do {
             try fm.createDirectory(atPath: installDir, withIntermediateDirectories: true)
@@ -240,10 +231,9 @@ enum Installer {
                 "KeepAlive": true,
                 "StandardErrorPath": logPath,
             ]
-            let data = try PropertyListSerialization.data(fromPropertyList: plist, format: .xml, options: 0)
             try fm.createDirectory(
                 atPath: (plistPath as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
-            try data.write(to: URL(fileURLWithPath: plistPath), options: .atomic)
+            try writePlist(plist, to: plistPath)
 
             _ = shell("/bin/launchctl", ["bootout", "gui/\(getuid())/\(label)"])
             let (status, out) = shell("/bin/launchctl", ["bootstrap", "gui/\(getuid())", plistPath])
@@ -298,7 +288,9 @@ enum Installer {
         // macOS never prompts for NSUserNotification sources; without the
         // prime-and-approve every banner is silent
         installNotifierApp()
-        primeNotifier("Notifications are set up - Hackatime posts important tracking events here.")
+        Notifier.primeDelivery(
+            message: "Notifications are set up - Hackatime posts important tracking events here.",
+            deliver: deliverBanner)
         return 0
     }
 
@@ -530,7 +522,7 @@ enum Installer {
         // share them
         let fm = FileManager.default
         var failures: [String] = []
-        for path in [plistPath, installedBinary, logPath, notifierApp] + allStateFiles
+        for path in [plistPath, installedBinary, logPath] + allStateFiles
         where fm.fileExists(atPath: path) {
             do { try fm.removeItem(atPath: path) } catch {
                 failures.append("\(path): \(error.localizedDescription)")

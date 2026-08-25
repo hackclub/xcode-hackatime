@@ -6,6 +6,7 @@ import AppKit
 /// fallback under another app's identity
 enum Notifier {
     static let bundleID = "com.hackclub.hackatime.notifier"
+    static let executableName = "hackatime-notifier"
 
     static func run(message: String) -> Never {
         // bundleIdentifier resolves only inside the helper bundle
@@ -25,7 +26,29 @@ enum Notifier {
         exit(0)
     }
 
-    enum Approval {
+    /// the first delivery registers the source suppressed, so: deliver to
+    /// register, wait for the ncprefs entry, approve it, deliver again so
+    /// the banner is actually seen. install-only; a user's later off toggle
+    /// in System Settings is never overridden
+    static func primeDelivery(message: String, deliver: (String) -> Void) {
+        deliver(message)
+        // the ncprefs entry appears asynchronously after the first delivery
+        for _ in 0..<10 {
+            switch approveDelivery() {
+            case .alreadyApproved:
+                return
+            case .approved:
+                // give the bounced usernoted a moment to come back
+                Thread.sleep(forTimeInterval: 1)
+                deliver(message)
+                return
+            case .notRegistered:
+                Thread.sleep(forTimeInterval: 0.3)
+            }
+        }
+    }
+
+    private enum Approval {
         case approved, alreadyApproved, notRegistered
     }
 
@@ -35,9 +58,10 @@ enum Notifier {
     /// the way the Settings pane does and bounces usernoted. verified live:
     /// the suppressed entry read flags 0x1280200e / auth 6, Script Editor's
     /// delivering entry reads 0x280200e; clearing bit 28 plus auth 7 made
-    /// banners appear. install is the only caller, so a user who later turns
-    /// Hackatime off in System Settings stays off
-    static func approveDelivery() -> Approval {
+    /// banners appear. raw CFPreferences rather than a UserDefaults
+    /// persistent domain: the explicit synchronize before the usernoted
+    /// bounce is the sequence that was verified live
+    private static func approveDelivery() -> Approval {
         let domain = "com.apple.ncprefs" as CFString
         let key = "apps" as CFString
         let pendingBit = 1 << 28
@@ -63,10 +87,14 @@ enum Notifier {
         let iconset = NSTemporaryDirectory() + "hackatime-\(getpid()).iconset"
         try? FileManager.default.createDirectory(atPath: iconset, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(atPath: iconset) }
+        // adjacent iconset sizes share pixel dimensions (16@2x = 32@1x);
+        // render each dimension once
+        var rendered: [Int: Data] = [:]
         for base in [16, 32, 128, 256, 512] {
             for scale in [1, 2] {
                 let px = base * scale
-                guard let png = renderIcon(pixels: px) else { continue }
+                guard let png = rendered[px] ?? renderIcon(pixels: px) else { continue }
+                rendered[px] = png
                 let suffix = scale == 2 ? "@2x" : ""
                 try? png.write(to: URL(fileURLWithPath: "\(iconset)/icon_\(base)x\(base)\(suffix).png"))
             }

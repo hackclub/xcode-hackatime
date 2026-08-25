@@ -171,9 +171,6 @@ case "check-trust":
     exit(AXIsProcessTrusted() ? 0 : 1)
 case "notify":
     Notifier.run(message: CommandLine.arguments.dropFirst(2).joined(separator: " "))
-case "make-notifier-app":
-    Installer.installNotifierApp()
-    exit(0)
 case "doctor":
     exit(Doctor.run())
 case "setup-key":
