@@ -62,7 +62,7 @@ saves.
 | Dial | Value | Lives in | Why |
 |---|---|---|---|
 | CLI fork cap | 1s | HeartbeatEngine.minSpacing | Never more than one wakatime-cli per second; rejected sends coalesce into `pendingSendFiles`, draining one per event/tick. |
-| Same-file heartbeat | 120s | HeartbeatEngine.heartbeatInterval | The standard WakaTime plugin rule. |
+| Same-file heartbeat | 30s | HeartbeatEngine.heartbeatInterval | Official plugins use 120s; we want denser position samples, and extra heartbeats between the same endpoints add zero tracked time, so this diverges deliberately. |
 | Sweep window | 2 × saveSlack | HeartbeatEngine.sweepWindow | Quiet ticks re-check files the user touched recently, catching autosaves that land after focus moved away. |
 | Baseline cap | 512 files | HeartbeatEngine.maxTrackedFiles | Session-lifetime maps reset rather than grow unbounded. |
 | Line-count cap | 10 MB | HeartbeatEngine.maxLineCountBytes | Synchronous read on the main run loop; the delta is optional metadata. |

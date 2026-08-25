@@ -97,7 +97,7 @@ final class HeartbeatEngineTests: XCTestCase {
     func testSameFileNotStaleDoesNotResend() {
         let file = makeFile("a.swift", lines: 3, mtime: clock)
         consider(file)
-        advance(30)
+        advance(HeartbeatEngine.heartbeatInterval - 1)
         consider(file)
         XCTAssertEqual(sentArgs.count, 1)
     }
@@ -140,7 +140,7 @@ final class HeartbeatEngineTests: XCTestCase {
         // changed on disk minutes ago, first noticed now: git pull, not cmd-S
         rewrite(file, lines: 100, mtime: clock.addingTimeInterval(-200))
         consider(file)
-        // a stale heartbeat still goes out (>120s), but without write credit
+        // a stale heartbeat still goes out, but without write credit
         XCTAssertEqual(sentArgs.count, 2)
         XCTAssertFalse(lastSend!.contains("--write"))
         XCTAssertNil(value(of: "--human-line-changes", in: lastSend!))
@@ -224,7 +224,7 @@ final class HeartbeatEngineTests: XCTestCase {
         consider(file)
         advance(200)
         consider(file)  // stale send keeps the user's per-file activity fresh
-        advance(30)
+        advance(20)
         // a tool replaced the file and preserved an old timestamp: newer than
         // the baseline, but far from any user activity in either direction
         rewrite(file, lines: 100, mtime: clock.addingTimeInterval(-180))
@@ -235,7 +235,7 @@ final class HeartbeatEngineTests: XCTestCase {
     func testFutureMTimeIsExternal() {
         let file = makeFile("a.swift", lines: 3, mtime: clock)
         consider(file)
-        advance(30)
+        advance(20)
         rewrite(file, lines: 100, mtime: clock.addingTimeInterval(300))  // bogus future stamp
         consider(file)
         XCTAssertEqual(sentArgs.count, 1, "future mtime must be swallowed as external")
@@ -270,7 +270,7 @@ final class HeartbeatEngineTests: XCTestCase {
     func testBackwardMTimeResetsBaseline() {
         let file = makeFile("a.swift", lines: 3, mtime: clock.addingTimeInterval(-1))
         consider(file)
-        advance(30)
+        advance(20)
         // checkout/restore: 100-line content stamped with an old mtime
         rewrite(file, lines: 100, mtime: clock.addingTimeInterval(-500))
         consider(file)

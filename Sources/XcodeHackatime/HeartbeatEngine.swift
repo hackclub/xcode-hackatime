@@ -2,14 +2,15 @@ import AppKit
 import Foundation
 
 /// turns editor activity into wakatime-cli heartbeats: send when the file
-/// changed, when a write landed, or 2 minutes after the last heartbeat for
-/// the same file (the standard plugin rule)
+/// changed, when a write landed, or heartbeatInterval after the last
+/// heartbeat for the same file
 final class HeartbeatEngine {
     // MARK: - Tuning
     // DESIGN.md lays out how these dials relate to the observer's timers and
     // WriteClassifier's attribution windows
 
-    static let heartbeatInterval: TimeInterval = 120
+    /// official plugins use 120; we use 30
+    static let heartbeatInterval: TimeInterval = 30
     /// cli forks stay at least this far apart; rejected sends coalesce into
     /// pendingSendFiles, never drop
     private static let minSpacing: TimeInterval = 1
