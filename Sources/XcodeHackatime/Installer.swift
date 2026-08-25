@@ -82,19 +82,75 @@ enum Installer {
         return true
     }
 
-    /// user-visible macOS banner via osascript (an unbundled binary cannot
-    /// use UNUserNotificationCenter). escapes the body, posts off the
-    /// calling thread and rate-limits each distinct message to one banner
-    /// per 10 minutes (per-message, so a grant banner cannot swallow the
-    /// tracker banner that follows it).
+    /// the helper bundle that gives banners a real Hackatime identity (name,
+    /// icon, Focus-manageable). assembled by install from our own binary.
+    static var notifierApp: String { installDir + "/Hackatime.app" }
+    static var notifierBinary: String { notifierApp + "/Contents/MacOS/hackatime-notifier" }
+
+    /// user-visible macOS banner. prefers the Hackatime.app helper (real
+    /// identity: our name and icon, Focus-manageable); falls back to
+    /// osascript, which delivers under Script Editor's identity. escapes the fallback
+    /// body, posts off the calling thread and rate-limits each distinct
+    /// message to one banner per 10 minutes (per-message, so a grant banner
+    /// cannot swallow the tracker banner that follows it).
     private static var lastBannerAt: [String: Date] = [:]
     static func postBanner(_ body: String) {
         guard Date().timeIntervalSince(lastBannerAt[body] ?? .distantPast) > 600 else { return }
         lastBannerAt[body] = Date()
-        let escaped = body.replacingOccurrences(of: "\\", with: "\\\\")
-            .replacingOccurrences(of: "\"", with: "\\\"")
         DispatchQueue.global(qos: .utility).async {
+            if FileManager.default.isExecutableFile(atPath: notifierBinary),
+                shell(notifierBinary, ["notify", body]).0 == 0
+            {
+                return
+            }
+            let escaped = body.replacingOccurrences(of: "\\", with: "\\\\")
+                .replacingOccurrences(of: "\"", with: "\\\"")
             shell("/usr/bin/osascript", ["-e", "display notification \"\(escaped)\" with title \"Hackatime\""])
+        }
+    }
+
+    /// assemble ~/.wakatime/Hackatime.app around a copy of our binary so
+    /// notifications carry Hackatime's own name and icon. the icon renders
+    /// on-device (no assets ship with the bare binary).
+    static func installNotifierApp() {
+        let fm = FileManager.default
+        let contents = notifierApp + "/Contents"
+        let macos = contents + "/MacOS"
+        let resources = contents + "/Resources"
+        do {
+            try fm.createDirectory(atPath: macos, withIntermediateDirectories: true)
+            try fm.createDirectory(atPath: resources, withIntermediateDirectories: true)
+            let info: [String: Any] = [
+                "CFBundleIdentifier": "com.hackclub.hackatime.notifier",
+                "CFBundleName": "Hackatime",
+                "CFBundleDisplayName": "Hackatime",
+                "CFBundleExecutable": "hackatime-notifier",
+                "CFBundleIconFile": "Hackatime",
+                "CFBundlePackageType": "APPL",
+                "CFBundleShortVersionString": appVersion,
+                "LSUIElement": true,
+            ]
+            let data = try PropertyListSerialization.data(fromPropertyList: info, format: .xml, options: 0)
+            try data.write(to: URL(fileURLWithPath: contents + "/Info.plist"), options: .atomic)
+            try? fm.removeItem(atPath: notifierBinary)
+            // copy ourselves (identical to installedBinary during install;
+            // also correct when a dev build assembles the helper directly).
+            let source = URL(fileURLWithPath: selfExecutablePath).resolvingSymlinksInPath().path
+            try fm.copyItem(atPath: source, toPath: notifierBinary)
+            let icon = resources + "/Hackatime.icns"
+            if !fm.fileExists(atPath: icon) { Notifier.writeIcon(to: icon) }
+            // sign the bundle so its code identity matches its bundle id
+            // (ad-hoc suffices for notification delivery; verified live).
+            shell(
+                "/usr/bin/codesign", ["-f", "-s", "-", "--identifier", "com.hackclub.hackatime.notifier", notifierApp])
+            // let LaunchServices resolve the bundle id and icon.
+            shell(
+                "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister",
+                ["-f", notifierApp])
+        } catch {
+            print(
+                "note: could not assemble the notification helper (\(error.localizedDescription)); banners fall back to Script Editor."
+            )
         }
     }
 
@@ -242,6 +298,13 @@ enum Installer {
         // explicit user action, so a window is expected. it self-suppresses
         // when the agent is already tracking.
         Onboarding.spawnIfNeeded(afterInstall: true)
+        // give banners a real Hackatime identity; the priming call triggers
+        // the one-time "Hackatime wants to send notifications" authorization
+        // at a moment the user is already paying attention.
+        installNotifierApp()
+        shell(
+            notifierBinary,
+            ["notify", "Notifications are set up - Hackatime posts important tracking events here."])
         return 0
     }
 
@@ -499,7 +562,7 @@ enum Installer {
         // state. never report any other removal failure as success.
         let fm = FileManager.default
         var failures: [String] = []
-        for path in [plistPath, installedBinary, logPath] + allStateFiles
+        for path in [plistPath, installedBinary, logPath, notifierApp] + allStateFiles
         where fm.fileExists(atPath: path) {
             do { try fm.removeItem(atPath: path) } catch {
                 failures.append("\(path): \(error.localizedDescription)")
