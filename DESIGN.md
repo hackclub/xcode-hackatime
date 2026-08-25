@@ -134,10 +134,20 @@ saves.
     preferences file watcher owns it from then on: it re-checks the moment
     the plist changes AND on every (re)attach, which covers cfprefsd's
     atomic replaces and the reattach gap without any polling fallback.
-    Each disable is logged, and the agent posts a macOS banner (via
-    osascript, since an unbundled binary cannot use
-    UNUserNotificationCenter) rate-limited to one per 10 minutes, so the
-    preference rewrite is never silent.
+    Each disable is logged, and the agent posts a macOS banner rate-limited
+    to one per 10 minutes per message, so the preference rewrite is never
+    silent. Banners go only through the `Hackatime.app` helper bundle that
+    install assembles around our own binary (Info.plist, on-device-rendered
+    icon, ad-hoc bundle signature); a missing helper means no banner,
+    never a fallback under another app's identity. Delivery uses the
+    deprecated `NSUserNotification` deliberately: `UNUserNotificationCenter`
+    silently auto-denies authorization outside a full app lifecycle
+    (verified live against ad-hoc signing, a real developer certificate, a
+    pumped run loop and a LaunchServices launch), while the deprecated API
+    has delivered from bundled CLI helpers for a decade. The helper also
+    gives users the sanctioned Focus path: a real "Hackatime" entry they
+    can style as Alerts and allow through Focus modes. True Focus bypass
+    (critical alerts) is Apple-gated and wrong for a time tracker anyway.
 
 ## The TCC dance
 

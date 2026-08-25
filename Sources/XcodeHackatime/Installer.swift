@@ -87,25 +87,19 @@ enum Installer {
     static var notifierApp: String { installDir + "/Hackatime.app" }
     static var notifierBinary: String { notifierApp + "/Contents/MacOS/hackatime-notifier" }
 
-    /// user-visible macOS banner. prefers the Hackatime.app helper (real
-    /// identity: our name and icon, Focus-manageable); falls back to
-    /// osascript, which delivers under Script Editor's identity. escapes the fallback
-    /// body, posts off the calling thread and rate-limits each distinct
-    /// message to one banner per 10 minutes (per-message, so a grant banner
-    /// cannot swallow the tracker banner that follows it).
+    /// user-visible macOS banner through the Hackatime.app helper (our own
+    /// name and icon, Focus-manageable). banners are best-effort: no helper
+    /// means no banner, never a fallback under another app's identity.
+    /// posts off the calling thread and rate-limits each distinct message
+    /// to one banner per 10 minutes (per-message, so a grant banner cannot
+    /// swallow the tracker banner that follows it).
     private static var lastBannerAt: [String: Date] = [:]
     static func postBanner(_ body: String) {
         guard Date().timeIntervalSince(lastBannerAt[body] ?? .distantPast) > 600 else { return }
         lastBannerAt[body] = Date()
+        guard FileManager.default.isExecutableFile(atPath: notifierBinary) else { return }
         DispatchQueue.global(qos: .utility).async {
-            if FileManager.default.isExecutableFile(atPath: notifierBinary),
-                shell(notifierBinary, ["notify", body]).0 == 0
-            {
-                return
-            }
-            let escaped = body.replacingOccurrences(of: "\\", with: "\\\\")
-                .replacingOccurrences(of: "\"", with: "\\\"")
-            shell("/usr/bin/osascript", ["-e", "display notification \"\(escaped)\" with title \"Hackatime\""])
+            shell(notifierBinary, ["notify", body])
         }
     }
 

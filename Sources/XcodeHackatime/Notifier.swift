@@ -3,10 +3,10 @@ import AppKit
 /// `xcode-hackatime notify <message>` posts a user notification through
 /// UNUserNotificationCenter. that API refuses unbundled binaries, so this
 /// subcommand only works when the binary runs from inside the Hackatime.app
-/// helper bundle that install assembles; the agent invokes it there and
-/// falls back to osascript when the helper is missing. the payoff is a real
-/// notification identity: our name, our icon and a Focus-manageable app the
-/// user can allow through.
+/// helper bundle that install assembles; the agent invokes it there, and a
+/// missing helper means no banner (banners are best-effort, and never wear
+/// another app's identity). the payoff is a real notification identity: our
+/// name, our icon and a Focus-manageable app the user can allow through.
 enum Notifier {
     static func run(message: String) -> Never {
         // bundleIdentifier resolves only inside the helper bundle; an
