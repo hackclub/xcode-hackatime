@@ -1,7 +1,6 @@
 > [!NOTE]
-> Early release. Live-tested against real Xcode on one machine so far;
-> releases are interim-signed (not notarized), so install via the curl
-> command below rather than a browser download. Report anything weird!
+> Early release. Live-tested against real Xcode on one machine so far.
+> Report anything weird!
 
 ---
 
