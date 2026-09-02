@@ -3,6 +3,8 @@ name: Release
 on:
   push:
     tags: ['v*']
+  # Manual runs exercise the whole signing pipeline without publishing.
+  workflow_dispatch:
 
 jobs:
   release:
@@ -12,6 +14,7 @@ jobs:
     # While signing secrets are unset, releases are built and published
     # locally with scripts/release.sh; the whole job no-ops so it can't
     # clobber a manually uploaded (signed) asset with an unsigned one.
+    # scripts/setup-signing.sh uploads every secret this job reads.
     env:
       HAVE_CERT: ${{ secrets.CSC_LINK != '' }}
     steps:
@@ -28,17 +31,27 @@ jobs:
           APPLE_CERTIFICATE: ${{ secrets.CSC_LINK }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
         run: |
-          KEYCHAIN=build.keychain
+          KEYCHAIN=$RUNNER_TEMP/build.keychain-db
           KEYCHAIN_PASSWORD=$(uuidgen)
           echo "$APPLE_CERTIFICATE" | base64 -d > cert.p12
-          security create-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN
-          security default-keychain -s $KEYCHAIN
-          security unlock-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN
-          security import cert.p12 -k $KEYCHAIN -P "$APPLE_CERTIFICATE_PASSWORD" \
-            -T /usr/bin/codesign
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          # Runners ship Apple's roots but not the intermediates; without them
+          # codesign can't build a chain and reports the identity as unusable.
+          # WWDR G3 issues development certs, the other two issue Developer ID.
+          for ca in AppleWWDRCAG3 DeveloperIDCA DeveloperIDG2CA; do
+            curl -fsSL "https://www.apple.com/certificateauthority/$ca.cer" -o "$ca.cer"
+            security import "$ca.cer" -k "$KEYCHAIN" -T /usr/bin/codesign
+            rm "$ca.cer"
+          done
+          security import cert.p12 -k "$KEYCHAIN" -P "$APPLE_CERTIFICATE_PASSWORD" \
+            -T /usr/bin/codesign -T /usr/bin/security
           security set-key-partition-list -S apple-tool:,apple: \
-            -s -k "$KEYCHAIN_PASSWORD" $KEYCHAIN
+            -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security list-keychains -d user -s "$KEYCHAIN" login.keychain
           rm cert.p12
+          security find-identity -v -p codesigning "$KEYCHAIN"
 
       - name: Build universal binary
         if: env.HAVE_CERT == 'true'
@@ -54,7 +67,9 @@ jobs:
             -s "$APPLE_SIGNING_IDENTITY" \
             --identifier com.hackclub.hackatime.xcode-hackatime \
             "$BIN"
-          codesign -dv "$BIN" 2>&1 | grep -E "Authority|TeamIdentifier"
+          codesign -dv --verbose=2 "$BIN" 2>&1 | grep -E "Authority|TeamIdentifier|flags"
+          codesign --verify --strict "$BIN"
+          "$BIN" version
 
       - name: Package and notarize
         if: env.HAVE_CERT == 'true'
@@ -69,17 +84,27 @@ jobs:
           # Notarization requires a Developer ID signature; skip cleanly while
           # releases are interim-signed with a development certificate.
           if codesign -dv "$BIN" 2>&1 | grep -q "Authority=Developer ID Application"; then
+            # notarytool exits 0 even when Apple returns "Invalid", so check
+            # the status line rather than the exit code.
             xcrun notarytool submit "$ZIP" --wait \
               --apple-id "$APPLE_ID" \
               --team-id "$APPLE_TEAM_ID" \
-              --password "$APPLE_PASSWORD"
+              --password "$APPLE_PASSWORD" | tee notary.log
+            grep -q "status: Accepted" notary.log
           else
             echo "::warning::Not Developer ID signed - skipping notarization (curl installs still work)"
           fi
           echo "ZIP=$ZIP" >> "$GITHUB_ENV"
 
+      - name: Keep build output for manual runs
+        if: env.HAVE_CERT == 'true' && github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v4
+        with:
+          name: xcode-hackatime-darwin-universal
+          path: ${{ env.ZIP }}
+
       - name: Upload release asset
-        if: env.HAVE_CERT == 'true'
+        if: env.HAVE_CERT == 'true' && startsWith(github.ref, 'refs/tags/')
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
