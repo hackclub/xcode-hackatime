@@ -1,6 +1,5 @@
 > [!NOTE]
-> Early release. Live-tested against real Xcode on one machine so far.
-> Report anything weird!
+> Early release, report anything weird!
 
 ---
 
@@ -31,8 +30,7 @@ swift build -c release
 
 Then grant permission once: **System Settings -> Privacy & Security ->
 Accessibility -> enable `xcode-hackatime`** (an onboarding window walks you
-through it). Tracking starts immediately; the agent auto-starts at login and
-reattaches whenever Xcode launches or quits.
+through it). And that's it!
 
 ## Commands
 
