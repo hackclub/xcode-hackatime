@@ -83,7 +83,7 @@ jobs:
           /usr/bin/ditto -c -k "$BIN" "$ZIP"
           # Notarization requires a Developer ID signature; skip cleanly while
           # releases are interim-signed with a development certificate.
-          if codesign -dv --verbose=2 "$BIN" 2>&1 | grep -q "Authority=Developer ID Application"; then| grep -q "Authority=Developer ID Application"; then
+          if codesign -dv --verbose=2 "$BIN" 2>&1 | grep -q "Authority=Developer ID Application"; then
             # notarytool exits 0 even when Apple returns "Invalid", so check
             # the status line rather than the exit code.
             xcrun notarytool submit "$ZIP" --wait \
